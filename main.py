@@ -38,6 +38,7 @@ from summit_store import (
     set_shift_break,
     end_shift,
     shift_leaderboard,
+    upsert_shift_records,
 
     # Summit LOA
     list_loa_guild_ids,
@@ -54,6 +55,7 @@ from summit_store import (
     deny_loa,
     end_loa,
     list_due_loas,
+    upsert_loa_records,
 )
 
 
@@ -194,6 +196,10 @@ async def refresh_guild_config_from_portal(guild: discord.Guild) -> None:
                     "on_break_role_id": _pick(
                         item, "on_break_role_id", "onBreakRoleId"
                     ),
+                    "manage_channel_id": _pick(
+                        item, "manage_channel_id", "shift_manage_channel_id",
+                        "manageChannelId", "shiftManageChannelId"
+                    ),
                     "log_channel_id": _pick(
                         item, "log_channel_id", "shift_log_channel_id",
                         "logChannelId", "shiftLogChannelId"
@@ -231,6 +237,44 @@ async def refresh_guild_config_from_portal(guild: discord.Guild) -> None:
         log.info("Loaded Shift/LOA configuration for guild %s from portal.", guild.id)
     except Exception as exc:
         log.warning("Could not load portal config for guild %s: %s", guild.id, exc)
+
+
+def _api_records(payload, *names):
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data")
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        payload = data
+    for name in names:
+        value = payload.get(name)
+        if isinstance(value, list):
+            return value
+    records = payload.get("records")
+    return records if isinstance(records, list) else []
+
+
+async def refresh_guild_records_from_portal(guild: discord.Guild) -> None:
+    if not SUMMIT_API.configured:
+        return
+    try:
+        shift_payload = await SUMMIT_API.get("/api/summit/records/shifts", guild.id)
+        upsert_shift_records(
+            _api_records(shift_payload, "shifts", "shift_records", "shiftRecords")
+        )
+    except Exception as exc:
+        log.warning("Could not hydrate shift records for guild %s: %s", guild.id, exc)
+
+    try:
+        loa_payload = await SUMMIT_API.get("/api/summit/records/loas", guild.id)
+        upsert_loa_records(
+            _api_records(loa_payload, "loas", "loa_records", "loaRecords")
+        )
+    except Exception as exc:
+        log.warning("Could not hydrate LOA records for guild %s: %s", guild.id, exc)
 
 
 async def sync_guild_directory_to_portal(guild: discord.Guild) -> None:
@@ -587,6 +631,7 @@ class SummitBot(commands.Bot):
             for guild in self.guilds:
                 await sync_guild_directory_to_portal(guild)
                 await refresh_guild_config_from_portal(guild)
+                await refresh_guild_records_from_portal(guild)
                 target_guild = discord.Object(id=guild.id)
                 self.tree.copy_global_to(guild=target_guild)
                 try:
@@ -2150,6 +2195,17 @@ async def shift_manage(interaction: discord.Interaction, type: app_commands.Choi
             "Use this command in a server.", ephemeral=True
         )
 
+    selected_type = get_shift_type_by_name(interaction.guild.id, type.value)
+    if selected_type:
+        manage_channel_id = str(selected_type.get("manage_channel_id") or "")
+        if manage_channel_id.isdigit() and interaction.channel_id != int(manage_channel_id):
+            channel = interaction.guild.get_channel(int(manage_channel_id))
+            destination = channel.mention if isinstance(channel, discord.TextChannel) else "the configured shift management channel"
+            return await interaction.response.send_message(
+                f"Use `/shift manage` in {destination}.",
+                ephemeral=True,
+            )
+
     await interaction.response.defer(ephemeral=True)
     active = get_active_shift(interaction.guild.id, interaction.user.id)
     selected = active["shift_type_name"] if active else type.value
@@ -2769,6 +2825,7 @@ async def summit_portal_sync_loop():
     for guild in bot.guilds:
         await sync_guild_directory_to_portal(guild)
         await refresh_guild_config_from_portal(guild)
+        await refresh_guild_records_from_portal(guild)
 
 
 @summit_portal_sync_loop.before_loop
