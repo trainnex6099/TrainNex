@@ -42,7 +42,7 @@ class SummitAPI:
 
         params = {}
         if guild_id is not None:
-            params["guild_id"] = str(guild_id)
+            params["guildId"] = str(guild_id)
 
         url = f"{self.base_url}{path}"
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
@@ -80,7 +80,7 @@ class SummitAPI:
     async def sync_roles(self, guild_id: int, roles: list[dict[str, Any]]) -> Any:
         return await self.put(
             "/api/summit/discord/roles",
-            {"guild_id": str(guild_id), "roles": roles},
+            {"guildId": str(guild_id), "roles": roles},
             guild_id,
         )
 
@@ -89,7 +89,7 @@ class SummitAPI:
     ) -> Any:
         return await self.put(
             "/api/summit/discord/channels",
-            {"guild_id": str(guild_id), "channels": channels},
+            {"guildId": str(guild_id), "channels": channels},
             guild_id,
         )
 
@@ -97,7 +97,7 @@ class SummitAPI:
         guild_id = record.get("guild_id")
         return await self.put(
             "/api/summit/records/shifts",
-            {"guild_id": str(guild_id or ""), "records": [record]},
+            {"guildId": str(guild_id or ""), "records": [record]},
             guild_id,
         )
 
