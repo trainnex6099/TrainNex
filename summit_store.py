@@ -162,6 +162,7 @@ def init_shift_db():
             is_default INTEGER DEFAULT 0,
             UNIQUE(guild_id,name)
         )""")
+        _ensure_column(db, "shift_types", "manage_channel_id", "TEXT DEFAULT ''")
         db.execute("""CREATE TABLE IF NOT EXISTS shifts (
             shift_id TEXT PRIMARY KEY,
             guild_id TEXT NOT NULL,
@@ -253,12 +254,13 @@ def save_shift_type(guild_id, values):
         if type_id:
             db.execute(
                 """UPDATE shift_types
-                   SET name=?,on_shift_role_id=?,on_break_role_id=?,log_channel_id=?,is_default=?
+                   SET name=?,on_shift_role_id=?,on_break_role_id=?,manage_channel_id=?,log_channel_id=?,is_default=?
                    WHERE id=? AND guild_id=?""",
                 (
                     values.get("name", "").strip(),
                     str(values.get("on_shift_role_id", "")),
                     str(values.get("on_break_role_id", "")),
+                    str(values.get("manage_channel_id", "")),
                     str(values.get("log_channel_id", "")),
                     default,
                     int(type_id),
@@ -267,13 +269,14 @@ def save_shift_type(guild_id, values):
             )
             return int(type_id)
         cur = db.execute(
-            """INSERT INTO shift_types(guild_id,name,on_shift_role_id,on_break_role_id,log_channel_id,is_default)
-               VALUES(?,?,?,?,?,?)""",
+            """INSERT INTO shift_types(guild_id,name,on_shift_role_id,on_break_role_id,manage_channel_id,log_channel_id,is_default)
+               VALUES(?,?,?,?,?,?,?)""",
             (
                 str(guild_id),
                 values.get("name", "").strip(),
                 str(values.get("on_shift_role_id", "")),
                 str(values.get("on_break_role_id", "")),
+                str(values.get("manage_channel_id", "")),
                 str(values.get("log_channel_id", "")),
                 default,
             ),
@@ -388,6 +391,47 @@ def get_shift_user_stats(guild_id, user_id):
         "total_seconds": total,
         "average_seconds": (total // count) if count else 0,
     }
+
+
+
+def upsert_shift_records(records):
+    init_shift_db()
+    if not records:
+        return
+    fields = [
+        "shift_id", "guild_id", "user_id", "username", "rank_name",
+        "shift_type_id", "shift_type_name", "started_at", "ended_at",
+        "break_started_at", "break_seconds", "status", "admin_adjustment",
+        "adjusted_by", "adjusted_at",
+    ]
+    with connect() as db:
+        for record in records:
+            if not isinstance(record, dict) or not record.get("shift_id"):
+                continue
+            values = [record.get(field) for field in fields]
+            db.execute(
+                """INSERT INTO shifts(
+                       shift_id,guild_id,user_id,username,rank_name,shift_type_id,
+                       shift_type_name,started_at,ended_at,break_started_at,
+                       break_seconds,status,admin_adjustment,adjusted_by,adjusted_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(shift_id) DO UPDATE SET
+                       guild_id=excluded.guild_id,
+                       user_id=excluded.user_id,
+                       username=excluded.username,
+                       rank_name=excluded.rank_name,
+                       shift_type_id=excluded.shift_type_id,
+                       shift_type_name=excluded.shift_type_name,
+                       started_at=excluded.started_at,
+                       ended_at=excluded.ended_at,
+                       break_started_at=excluded.break_started_at,
+                       break_seconds=excluded.break_seconds,
+                       status=excluded.status,
+                       admin_adjustment=excluded.admin_adjustment,
+                       adjusted_by=excluded.adjusted_by,
+                       adjusted_at=excluded.adjusted_at""",
+                values,
+            )
 
 
 def set_shift_break(shift_id, on_break):
@@ -643,6 +687,50 @@ def set_loa_request_message(loa_id, channel_id, message_id):
             (str(channel_id), str(message_id), loa_id),
         )
     return get_loa(loa_id)
+
+
+
+def upsert_loa_records(records):
+    init_loa_db()
+    if not records:
+        return
+    fields = [
+        "loa_id", "guild_id", "user_id", "username", "reason", "duration_text",
+        "duration_seconds", "start_at", "end_at", "status", "requested_at",
+        "reviewed_at", "reviewed_by", "denial_reason", "ended_at", "ended_by",
+        "request_message_id", "request_channel_id",
+    ]
+    with connect() as db:
+        for record in records:
+            if not isinstance(record, dict) or not record.get("loa_id"):
+                continue
+            values = [record.get(field) for field in fields]
+            db.execute(
+                """INSERT INTO loa_requests(
+                       loa_id,guild_id,user_id,username,reason,duration_text,duration_seconds,
+                       start_at,end_at,status,requested_at,reviewed_at,reviewed_by,denial_reason,
+                       ended_at,ended_by,request_message_id,request_channel_id
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(loa_id) DO UPDATE SET
+                       guild_id=excluded.guild_id,
+                       user_id=excluded.user_id,
+                       username=excluded.username,
+                       reason=excluded.reason,
+                       duration_text=excluded.duration_text,
+                       duration_seconds=excluded.duration_seconds,
+                       start_at=excluded.start_at,
+                       end_at=excluded.end_at,
+                       status=excluded.status,
+                       requested_at=excluded.requested_at,
+                       reviewed_at=excluded.reviewed_at,
+                       reviewed_by=excluded.reviewed_by,
+                       denial_reason=excluded.denial_reason,
+                       ended_at=excluded.ended_at,
+                       ended_by=excluded.ended_by,
+                       request_message_id=excluded.request_message_id,
+                       request_channel_id=excluded.request_channel_id""",
+                values,
+            )
 
 
 def approve_loa(loa_id, reviewer_id):
