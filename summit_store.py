@@ -1,9 +1,12 @@
 import secrets
+import os
 import sqlite3
 import time
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent / "summit.db"
+DATA_DIR = Path(os.getenv('SUMMIT_DATA_DIR', str(Path(__file__).resolve().parent)))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA_DIR / "summit.db"
 
 DEFAULT_MESSAGES = {
     "trainer_offer": "{trainee} has been approved and is ready for training.\n\n🔗 [View Approval & Results]({approval_url})\n\n⏰ This offer will expire {expires}.",
@@ -22,8 +25,16 @@ CONFIG_FIELDS = [
 ]
 
 
+class ManagedConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def connect():
-    db = sqlite3.connect(DB_PATH)
+    db = sqlite3.connect(DB_PATH, factory=ManagedConnection)
     db.row_factory = sqlite3.Row
     return db
 
@@ -162,6 +173,7 @@ def init_shift_db():
             is_default INTEGER DEFAULT 0,
             UNIQUE(guild_id,name)
         )""")
+        _ensure_column(db, 'shift_settings', 'enabled', 'INTEGER DEFAULT 1')
         _ensure_column(db, "shift_types", "manage_channel_id", "TEXT DEFAULT ''")
         db.execute("""CREATE TABLE IF NOT EXISTS shifts (
             shift_id TEXT PRIMARY KEY,
@@ -204,9 +216,9 @@ def save_shift_settings(guild_id, values):
     init_shift_db()
     with connect() as db:
         db.execute(
-            """INSERT INTO shift_settings(guild_id,admin_role_id) VALUES(?,?)
-               ON CONFLICT(guild_id) DO UPDATE SET admin_role_id=excluded.admin_role_id""",
-            (str(guild_id), str(values.get("admin_role_id", "")).strip()),
+            """INSERT INTO shift_settings(guild_id,admin_role_id,enabled) VALUES(?,?,?)
+               ON CONFLICT(guild_id) DO UPDATE SET admin_role_id=excluded.admin_role_id,enabled=excluded.enabled""",
+            (str(guild_id), str(values.get("admin_role_id", "")).strip(), int(bool(values.get('enabled', True)))),
         )
 
 
@@ -547,6 +559,7 @@ def init_loa_db():
             request_message_id TEXT DEFAULT '',
             request_channel_id TEXT DEFAULT ''
         )""")
+        _ensure_column(db, 'loa_settings', 'reviewer_role_id', "TEXT DEFAULT ''")
         db.execute(
             "CREATE INDEX IF NOT EXISTS idx_loa_user ON loa_requests(guild_id,user_id,requested_at DESC)"
         )
@@ -578,19 +591,20 @@ def save_loa_settings(guild_id, values):
     init_loa_db()
     with connect() as db:
         db.execute(
-            """INSERT INTO loa_settings(guild_id,enabled,request_channel_id,log_channel_id,on_leave_role_id)
-               VALUES(?,?,?,?,?)
+            """INSERT INTO loa_settings(guild_id,enabled,request_channel_id,log_channel_id,on_leave_role_id,reviewer_role_id)
+               VALUES(?,?,?,?,?,?)
                ON CONFLICT(guild_id) DO UPDATE SET
                    enabled=excluded.enabled,
                    request_channel_id=excluded.request_channel_id,
                    log_channel_id=excluded.log_channel_id,
-                   on_leave_role_id=excluded.on_leave_role_id""",
+                   on_leave_role_id=excluded.on_leave_role_id,reviewer_role_id=excluded.reviewer_role_id""",
             (
                 str(guild_id),
                 1 if values.get("enabled", True) else 0,
                 str(values.get("request_channel_id", "")).strip(),
                 str(values.get("log_channel_id", "")).strip(),
                 str(values.get("on_leave_role_id", "")).strip(),
+                str(values.get("reviewer_role_id", "")).strip(),
             ),
         )
 
@@ -793,3 +807,4 @@ def list_due_loas(now=None):
 
 init_shift_db()
 init_loa_db()
+
