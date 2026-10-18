@@ -13,6 +13,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from summit_api import SummitAPI
+import summit_bridge
 from summit_store import (
     init_db as init_summit_db,
     get_trainnex_config,
@@ -75,6 +76,8 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 SUMMIT_API = SummitAPI()
+LOA_REVIEWER_ROLE_IDS = {'1516452951030239365', '1516454159002501211', '1516306764172230690'}
+HYDRATED_GUILDS = set()
 
 # ----------------------------
 # Trainnex configuration
@@ -117,23 +120,24 @@ def _pick(mapping: dict, *names, default=""):
 
 
 async def refresh_trainnex_from_portal() -> None:
+    global LOA_REVIEWER_ROLE_IDS
     if not SUMMIT_API.configured:
         return
     try:
         payload = _api_data(await SUMMIT_API.get("/api/summit/config/trainnex"))
         cfg = payload.get("config") if isinstance(payload.get("config"), dict) else payload
         save_trainnex_config({
-            "application_server_id": _pick(cfg, "application_server_id", "applicationServerId"),
+            "application_server_id": _pick(cfg, "application_server_id", "applicationServerId", "applicationGuildId"),
             "approval_channel_id": _pick(cfg, "approval_channel_id", "approvalChannelId"),
             "melony_bot_id": _pick(cfg, "melony_bot_id", "melonyBotId"),
-            "training_server_id": _pick(cfg, "training_server_id", "trainingServerId"),
+            "training_server_id": _pick(cfg, "training_server_id", "trainingServerId", "trainingGuildId"),
             "fto_role_id": _pick(cfg, "fto_role_id", "ftoRoleId"),
             "announcement_channel_id": _pick(
                 cfg, "announcement_channel_id", "open_announcement_channel_id",
                 "announcementChannelId", "openAnnouncementChannelId"
             ),
             "claim_notification_channel_id": _pick(
-                cfg, "claim_notification_channel_id", "claimNotificationChannelId"
+                cfg, "claim_notification_channel_id", "claimNotificationChannelId", "claimChannelId"
             ),
             "fto_commander_role_id": _pick(
                 cfg, "fto_commander_role_id", "ftoCommanderRoleId"
@@ -143,6 +147,8 @@ async def refresh_trainnex_from_portal() -> None:
             ),
         })
         load_trainnex_runtime_config()
+        permissions = await SUMMIT_API.get('/api/summit/permissions')
+        LOA_REVIEWER_ROLE_IDS = set(permissions.get('loaReviewerRoleIds', list(LOA_REVIEWER_ROLE_IDS)))
         log.info("Loaded Trainnex configuration from WCSO Portal.")
     except Exception as exc:
         log.warning("Could not load Trainnex configuration from portal: %s", exc)
@@ -163,6 +169,7 @@ async def refresh_guild_config_from_portal(guild: discord.Guild) -> None:
             else shift_payload
         )
         save_shift_settings(guild.id, {
+            "enabled": bool(shift_cfg.get('enabled', True)),
             "admin_role_id": _pick(
                 shift_cfg, "admin_role_id", "adminRoleId", "manager_role_id", "managerRoleId"
             )
@@ -208,7 +215,7 @@ async def refresh_guild_config_from_portal(guild: discord.Guild) -> None:
                         item, "is_default", "isDefault", "default", default=False
                     )),
                 })
-            if remote_names:
+            if any(key in shift_payload for key in ('shift_types', 'types', 'shiftTypes')):
                 for row in list_shift_types(guild.id):
                     if row["name"].lower() not in remote_names:
                         delete_shift_type(guild.id, row["id"])
@@ -260,28 +267,36 @@ def _api_records(payload, *names):
 async def refresh_guild_records_from_portal(guild: discord.Guild) -> None:
     if not SUMMIT_API.configured:
         return
+    if guild.id in HYDRATED_GUILDS:
+        return
     try:
-        shift_payload = await SUMMIT_API.get("/api/summit/records/shifts", guild.id)
-        upsert_shift_records(
-            _api_records(shift_payload, "shifts", "shift_records", "shiftRecords")
-        )
+        training = await summit_bridge.restore(SUMMIT_API, guild.id)
+        HYDRATED_GUILDS.add(guild.id)
+        if training is not None and guild.id == TRAINING_SERVER_ID and not (DATA['queue'] or DATA['offers'] or DATA['pending']):
+            DATA.update(training)
+            normalize_queue()
+            save_data()
+            for offer_id, offer in DATA['offers'].items():
+                if offer.get('state') == 'pending':
+                    bot.add_view(OfferView(offer_id), message_id=offer.get('dm_message_id'))
+                    bot.schedule_offer_expiration(offer_id)
+            for trainee_id, pending in DATA['pending'].items():
+                if pending.get('state') == 'open':
+                    bot.add_view(FallbackClaimView(int(trainee_id)), message_id=pending.get('announcement_message_id'))
+        for loa in list_pending_loas():
+            message_id = str(loa.get('request_message_id') or '')
+            if message_id.isdigit():
+                bot.add_view(LOAApprovalView(loa['loa_id']), message_id=int(message_id))
     except Exception as exc:
         log.warning("Could not hydrate shift records for guild %s: %s", guild.id, exc)
-
-    try:
-        loa_payload = await SUMMIT_API.get("/api/summit/records/loas", guild.id)
-        upsert_loa_records(
-            _api_records(loa_payload, "loas", "loa_records", "loaRecords")
-        )
-    except Exception as exc:
-        log.warning("Could not hydrate LOA records for guild %s: %s", guild.id, exc)
 
 
 async def sync_guild_directory_to_portal(guild: discord.Guild) -> None:
     if not SUMMIT_API.configured:
         return
     roles = [
-        {"id": str(role.id), "name": role.name, "position": int(role.position)}
+        {"id": str(role.id), "name": role.name, "position": int(role.position),
+         "color": role.color.value, "managed": role.managed}
         for role in guild.roles
         if not role.is_default()
     ]
@@ -290,7 +305,8 @@ async def sync_guild_directory_to_portal(guild: discord.Guild) -> None:
             "id": str(channel.id),
             "name": channel.name,
             "position": int(getattr(channel, "position", 0)),
-            "type": str(channel.type),
+            "type": channel.type.value,
+            "categoryId": str(channel.category_id) if getattr(channel, 'category_id', None) else None,
         }
         for channel in guild.channels
     ]
@@ -311,6 +327,7 @@ async def sync_shift_record_to_portal(record: dict | None) -> None:
         return
     try:
         await SUMMIT_API.sync_shift_record(record)
+        await publish_portal_state(int(record['guild_id']))
     except Exception as exc:
         log.warning("Could not sync shift %s to portal: %s", record.get("shift_id"), exc)
 
@@ -320,6 +337,7 @@ async def sync_loa_record_to_portal(record: dict | None) -> None:
         return
     try:
         await SUMMIT_API.sync_loa_record(record)
+        await publish_portal_state(int(record['guild_id']))
     except Exception as exc:
         log.warning("Could not sync LOA %s to portal: %s", record.get("loa_id"), exc)
 
@@ -327,7 +345,7 @@ async def sync_loa_record_to_portal(record: dict | None) -> None:
 # Behavior
 # ----------------------------
 OFFER_TIMEOUT_SECONDS = 30 * 60
-DATA_FILE = Path("data.json")
+DATA_FILE = Path(os.getenv('SUMMIT_DATA_DIR', '.')) / 'data.json'
 LOG_FILE = Path("summit.log")
 
 EMBED_COLOR = discord.Color.from_rgb(105, 135, 55)  # Trainnex olive
@@ -620,6 +638,8 @@ class SummitBot(commands.Bot):
             loa_expiration_loop.start()
         if not summit_portal_sync_loop.is_running():
             summit_portal_sync_loop.start()
+        if not summit_portal_commands_loop.is_running():
+            summit_portal_commands_loop.start()
 
         self.setup_complete = True
 
@@ -640,6 +660,10 @@ class SummitBot(commands.Bot):
                     log.warning("Could not sync commands to guild %s: %s", guild.id, exc)
         else:
             log.warning("Summit Portal API is not configured; using local database settings.")
+            for guild in self.guilds:
+                target = discord.Object(id=guild.id)
+                self.tree.copy_global_to(guild=target)
+                await self.tree.sync(guild=target)
 
         # Resume timers after reconnect/restart.
         for offer_id, offer in list(DATA["offers"].items()):
@@ -2105,6 +2129,8 @@ class ShiftManageView(discord.ui.View):
     @discord.ui.button(label="Start", style=discord.ButtonStyle.success)
     async def start_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
+        if not get_shift_settings(interaction.guild.id).get('enabled', 1):
+            return await interaction.followup.send('Shifts are disabled for this server.', ephemeral=True)
         shift_type = get_shift_type_by_name(interaction.guild.id, self.shift_type_name)
         if not shift_type:
             return await interaction.followup.send(
@@ -2149,7 +2175,7 @@ class ShiftManageView(discord.ui.View):
         except ValueError as exc:
             return await interaction.followup.send(str(exc), ephemeral=True)
 
-        shift_type = get_shift_type(shift["shift_type_id"])
+        shift_type = get_shift_type(shift["shift_type_id"]) or {}
         await _apply_shift_roles(interaction.user, shift_type, shift["status"])
         await _shift_log(interaction.guild, shift, event, interaction.user)
         await sync_shift_record_to_portal(shift)
@@ -2168,7 +2194,7 @@ class ShiftManageView(discord.ui.View):
             return await interaction.followup.send(
                 "You do not have an active shift.", ephemeral=True
             )
-        shift_type = get_shift_type(shift["shift_type_id"])
+        shift_type = get_shift_type(shift["shift_type_id"]) or {}
         shift = end_shift(shift["shift_id"])
         await sync_shift_record_to_portal(shift)
         await _apply_shift_roles(interaction.user, shift_type, "ended")
@@ -2186,16 +2212,17 @@ shift = app_commands.Group(name="shift", description="Summit shift management")
 
 @shift.command(name="manage", description="Manage your Summit shift.")
 @app_commands.describe(type="The shift type to manage")
-@app_commands.choices(
-    type=[app_commands.Choice(name=name, value=name) for name in SHIFT_TYPE_NAMES]
-)
-async def shift_manage(interaction: discord.Interaction, type: app_commands.Choice[str]):
+async def shift_manage(interaction: discord.Interaction, type: str | None = None):
     if interaction.guild is None or not isinstance(interaction.user, discord.Member):
         return await interaction.response.send_message(
             "Use this command in a server.", ephemeral=True
         )
 
-    selected_type = get_shift_type_by_name(interaction.guild.id, type.value)
+    if type is None:
+        configured = list_shift_types(interaction.guild.id)
+        default_type = next((row for row in configured if row.get('is_default')), configured[0] if configured else None)
+        type = default_type['name'] if default_type else 'Patrol'
+    selected_type = get_shift_type_by_name(interaction.guild.id, type)
     if selected_type:
         manage_channel_id = str(selected_type.get("manage_channel_id") or "")
         if manage_channel_id.isdigit() and interaction.channel_id != int(manage_channel_id):
@@ -2208,7 +2235,7 @@ async def shift_manage(interaction: discord.Interaction, type: app_commands.Choi
 
     await interaction.response.defer(ephemeral=True)
     active = get_active_shift(interaction.guild.id, interaction.user.id)
-    selected = active["shift_type_name"] if active else type.value
+    selected = active["shift_type_name"] if active else type
     view = ShiftManageView(interaction.user.id, selected)
     view.sync_state(active)
     await interaction.followup.send(
@@ -2529,12 +2556,8 @@ async def _edit_loa_request_message(
 
 
 def _can_review_loa(member: discord.Member) -> bool:
-    settings = get_loa_settings(member.guild.id)
-    channel_id = str(settings.get("log_channel_id") or "")
-    if not channel_id.isdigit():
-        return False
-    channel = member.guild.get_channel(int(channel_id))
-    return isinstance(channel, discord.TextChannel) and channel.permissions_for(member).view_channel
+    local_role = str(get_loa_settings(member.guild.id).get('reviewer_role_id') or '')
+    return member.guild_permissions.administrator or any(str(role.id) in LOA_REVIEWER_ROLE_IDS or str(role.id) == local_role for role in member.roles)
 
 
 async def _apply_loa_role(guild: discord.Guild, user_id: int, add: bool):
@@ -2825,11 +2848,177 @@ async def summit_portal_sync_loop():
     for guild in bot.guilds:
         await sync_guild_directory_to_portal(guild)
         await refresh_guild_config_from_portal(guild)
-        await refresh_guild_records_from_portal(guild)
+        if guild.id not in HYDRATED_GUILDS:
+            await refresh_guild_records_from_portal(guild)
+        try:
+            await publish_portal_state(guild.id)
+        except Exception as exc:
+            log.warning('Portal backup pending for guild %s: %s', guild.id, exc)
 
 
 @summit_portal_sync_loop.before_loop
 async def before_summit_portal_sync_loop():
+    await bot.wait_until_ready()
+
+
+async def publish_portal_state(guild_id):
+    if guild_id not in HYDRATED_GUILDS:
+        raise RuntimeError('Initial portal restore has not completed; backup is paused to protect existing records')
+    training = DATA if guild_id == TRAINING_SERVER_ID else None
+    await summit_bridge.publish(SUMMIT_API, guild_id, training)
+
+
+async def execute_portal_action(action, actor_id):
+    """Portal actions use the same records and role/message helpers as Discord."""
+    guild_id = str(action.get('guildId', ''))
+    if not guild_id.isdigit() or not actor_id.isdigit():
+        raise ValueError('Invalid Discord identity')
+    guild = bot.get_guild(int(guild_id))
+    if guild is None:
+        raise ValueError('Summit is not connected to that server')
+    if guild.id not in HYDRATED_GUILDS:
+        raise ValueError('Summit is still restoring this server. Try again after synchronization completes.')
+    # Do not trust cached portal roles: verify current server membership.
+    member = await guild.fetch_member(int(actor_id))
+    name = action.get('action')
+    if name != 'directory.sync' and not str(name).startswith('training.') and not any(str(role.id) == '1516647746025558017' for role in member.roles):
+        raise PermissionError('WCSO employee role required')
+    result = {}
+    if name == 'directory.sync':
+        await sync_guild_directory_to_portal(guild)
+        return {'ok': True}
+    elif name in ('shift.start', 'shift.break', 'shift.resume', 'shift.end'):
+        current = get_active_shift(guild.id, member.id)
+        if name == 'shift.start':
+            if not get_shift_settings(guild.id).get('enabled', 1):
+                raise ValueError('Shifts are disabled for this server')
+            shift_type = get_shift_type_by_name(guild.id, str(action.get('type', 'Patrol')))
+            if not shift_type:
+                raise ValueError('Shift type is not configured')
+            record = start_shift(guild.id, member.id, member.display_name, member.top_role.name, shift_type['id'])
+            event = 'started'
+        else:
+            if not current or current['shift_id'] != action.get('recordId'):
+                raise ValueError('This shift changed. Refresh the portal before continuing.')
+            shift_type = get_shift_type(current['shift_type_id'])
+            if name == 'shift.end':
+                record = end_shift(current['shift_id'])
+                event = 'ended'
+            else:
+                on_break = name == 'shift.break'
+                record = set_shift_break(current['shift_id'], on_break)
+                event = 'break_started' if on_break else 'break_ended'
+        await _apply_shift_roles(member, shift_type or {}, record['status'])
+        await _shift_log(guild, record, event, member)
+        await sync_shift_record_to_portal(record)
+        result = {'shiftId': record['shift_id'], 'status': record['status']}
+    elif name == 'loa.request':
+        settings = get_loa_settings(guild.id)
+        if not settings.get('enabled'):
+            raise ValueError('LOAs are disabled')
+        channel_id = str(settings.get('request_channel_id') or '')
+        channel = guild.get_channel(int(channel_id)) if channel_id.isdigit() else None
+        if not isinstance(channel, discord.TextChannel):
+            raise ValueError('LOA request channel is not configured')
+        reason = str(action.get('reason', '')).strip()
+        if not 1 <= len(reason) <= 1000:
+            raise ValueError('Enter a reason of 1–1000 characters')
+        duration, seconds = _parse_loa_duration(str(action.get('duration', '')))
+        record = create_loa_request(guild.id, member.id, member.display_name, duration, seconds, reason)
+        message = await channel.send(content=f'{member.mention} has requested a leave of absence.',
+            embed=_loa_request_embed(guild, record, member), view=LOAApprovalView(record['loa_id']),
+            allowed_mentions=discord.AllowedMentions(users=True))
+        record = set_loa_request_message(record['loa_id'], channel.id, message.id)
+        await sync_loa_record_to_portal(record)
+        await _send_loa_dm(member, guild, record, 'pending')
+        result = {'loaId': record['loa_id'], 'status': record['status']}
+    elif name in ('loa.approve', 'loa.deny', 'loa.end'):
+        record = get_loa(str(action.get('recordId', '')))
+        if not record or str(record['guild_id']) != guild_id:
+            raise ValueError('LOA not found in this server')
+        own = str(record['user_id']) == actor_id
+        if (name != 'loa.end' or not own) and not _can_review_loa(member):
+            raise PermissionError('You cannot manage this LOA')
+        if name == 'loa.approve':
+            record = approve_loa(record['loa_id'], actor_id)
+        elif name == 'loa.deny':
+            reason = str(action.get('reason', '')).strip()
+            if not 1 <= len(reason) <= 1000:
+                raise ValueError('Enter a denial reason')
+            record = deny_loa(record['loa_id'], actor_id, reason)
+        else:
+            record = end_loa(record['loa_id'], actor_id)
+        await sync_loa_record_to_portal(record)
+        await _apply_loa_role(guild, int(record['user_id']), record['status'] == 'approved')
+        requester = await guild.fetch_member(int(record['user_id']))
+        await _loa_log(guild, record, record['status'])
+        await _send_loa_dm(requester, guild, record, record['status'])
+        await _edit_loa_request_message(guild, record, requester)
+        result = {'loaId': record['loa_id'], 'status': record['status']}
+    elif name in ('training.add', 'training.remove', 'training.claim', 'training.pass', 'training.claim-open'):
+        if guild.id != TRAINING_SERVER_ID:
+            raise ValueError('Use the configured training server')
+        if name in ('training.add', 'training.remove'):
+            if not is_queue_manager(member):
+                raise PermissionError('FTO manager permission required')
+            target = await guild.fetch_member(int(action.get('trainerId', '0')))
+            if name == 'training.add':
+                if not has_fto_role(target):
+                    raise ValueError('That member is not an FTO')
+                if target.id not in DATA['queue']:
+                    DATA['queue'].append(target.id)
+            else:
+                remove_from_queue(target.id)
+            save_data()
+        elif name == 'training.claim-open':
+            if not has_fto_role(member):
+                raise PermissionError('FTO role required')
+            trainee_id = str(action.get('traineeId', ''))
+            pending = DATA['pending'].get(trainee_id)
+            if not pending or pending.get('state') != 'open':
+                raise ValueError('This trainee is no longer available')
+            if any(o.get('trainer_id') == member.id and o.get('state') == 'pending' for o in DATA['offers'].values()):
+                raise ValueError('You already have a pending trainee offer')
+            pending.update(state='claimed', claimed_by=member.id, claimed_at=time.time())
+            move_to_back(member.id)
+            save_data()
+            channel = await get_training_channel(ANNOUNCEMENT_CHANNEL_ID)
+            if channel and pending.get('announcement_message_id'):
+                try:
+                    message = await channel.fetch_message(int(pending['announcement_message_id']))
+                    await message.edit(content='', embed=build_fallback_claimed_embed(int(trainee_id), member.id, pending['approval_url']), view=None)
+                except discord.HTTPException:
+                    log.warning('Could not update fallback announcement for %s', trainee_id)
+            await send_claim_notification(int(trainee_id), member.id, pending['approval_url'])
+        else:
+            if not has_fto_role(member):
+                raise PermissionError('FTO role required')
+            offer_id = str(action.get('offerId', ''))
+            offer = DATA['offers'].get(offer_id)
+            if not offer or offer.get('state') != 'pending' or int(offer['trainer_id']) != member.id:
+                raise ValueError('This offer is not assigned to you or is no longer pending')
+            if time.time() >= float(offer['expires_at']):
+                raise ValueError('This offer expired')
+            await finish_offer(offer_id, 'claimed' if name == 'training.claim' else 'passed')
+        result = {'ok': True}
+    else:
+        raise ValueError('Unsupported portal action')
+    await publish_portal_state(guild.id)
+    return result
+
+
+@tasks.loop(seconds=5)
+async def summit_portal_commands_loop():
+    if not SUMMIT_API.configured:
+        return
+    try:
+        await summit_bridge.process(SUMMIT_API, execute_portal_action)
+    except Exception as exc:
+        log.warning('Portal command poll failed: %s', exc)
+
+
+@summit_portal_commands_loop.before_loop
+async def before_portal_commands():
     await bot.wait_until_ready()
 
 
@@ -2855,6 +3044,66 @@ async def on_app_command_error(
         pass
 
 
+summit_setup = app_commands.Group(name='summit', description='Summit standalone configuration')
+
+
+async def allow_standalone_setup(interaction):
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member) or not (
+        interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild
+    ):
+        await interaction.response.send_message('Manage Server permission is required.', ephemeral=True)
+        return False
+    if SUMMIT_API.configured:
+        await interaction.response.send_message('Summit is connected to WCSO. Manage settings in the WCSO portal.', ephemeral=True)
+        return False
+    return True
+
+
+@summit_setup.command(name='shift-setup', description='Configure a shift type without the portal.')
+async def summit_shift_setup(interaction: discord.Interaction, name: str,
+    log_channel: discord.TextChannel, manage_channel: discord.TextChannel,
+    on_shift_role: discord.Role, on_break_role: discord.Role | None = None,
+    default: bool = False):
+    if not await allow_standalone_setup(interaction): return
+    if not name.strip() or len(name.strip()) > 80:
+        return await interaction.response.send_message('Use a shift name of 1–80 characters.', ephemeral=True)
+    old = get_shift_type_by_name(interaction.guild.id, name)
+    save_shift_type(interaction.guild.id, {'id': old['id'] if old else None,'name':name.strip(),
+        'on_shift_role_id':str(on_shift_role.id),'on_break_role_id':str(on_break_role.id) if on_break_role else '',
+        'log_channel_id':str(log_channel.id),'manage_channel_id':str(manage_channel.id),'is_default':default})
+    save_shift_settings(interaction.guild.id,{'enabled':True})
+    await interaction.response.send_message('Shift type saved. Use /shift manage.', ephemeral=True)
+
+
+@summit_setup.command(name='loa-setup', description='Configure LOAs without the portal.')
+async def summit_loa_setup(interaction: discord.Interaction, request_channel: discord.TextChannel,
+    log_channel: discord.TextChannel, on_leave_role: discord.Role, reviewer_role: discord.Role):
+    if not await allow_standalone_setup(interaction): return
+    save_loa_settings(interaction.guild.id,{'enabled':True,'request_channel_id':str(request_channel.id),
+        'log_channel_id':str(log_channel.id),'on_leave_role_id':str(on_leave_role.id),'reviewer_role_id':str(reviewer_role.id)})
+    await interaction.response.send_message('LOA settings saved. Use /loa manage.', ephemeral=True)
+
+
+@summit_setup.command(name='training-setup', description='Configure TrainNex from its training server.')
+async def summit_training_setup(interaction: discord.Interaction, application_server_id: str,
+    approval_channel_id: str, melony_bot_id: str, fto_role: discord.Role,
+    announcement_channel: discord.TextChannel, claim_channel: discord.TextChannel,
+    commander_role: discord.Role, overseer_role: discord.Role):
+    if not await allow_standalone_setup(interaction): return
+    if any(not value.isdigit() or not 15 <= len(value) <= 22 for value in (application_server_id, approval_channel_id, melony_bot_id)):
+        return await interaction.response.send_message('Use valid Discord IDs for the application server, approval channel and Melonly bot.', ephemeral=True)
+    save_trainnex_config({'application_server_id':application_server_id,'approval_channel_id':approval_channel_id,
+        'melony_bot_id':melony_bot_id,'training_server_id':str(interaction.guild.id),'fto_role_id':str(fto_role.id),
+        'announcement_channel_id':str(announcement_channel.id),'claim_notification_channel_id':str(claim_channel.id),
+        'fto_commander_role_id':str(commander_role.id),'fto_overseer_role_id':str(overseer_role.id)})
+    load_trainnex_runtime_config()
+    await interaction.response.send_message('TrainNex configured. Add FTOs with /trainner add.', ephemeral=True)
+
+
+bot.tree.add_command(summit_setup)
+
+
 if __name__ == "__main__":
     log.info("Starting Summit...")
     bot.run(TOKEN)
+

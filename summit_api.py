@@ -3,6 +3,7 @@ import os
 from typing import Any
 
 import aiohttp
+from summit_wire import shift_payload, loa_payload
 
 log = logging.getLogger("Summit.API")
 
@@ -64,7 +65,7 @@ class SummitAPI:
                 try:
                     return await response.json(content_type=None)
                 except Exception:
-                    return {"raw": text}
+                    raise RuntimeError(f"Summit API {path} returned non-JSON data")
 
     async def get(self, path: str, guild_id: int | str | None = None) -> Any:
         return await self.request("GET", path, guild_id=guild_id)
@@ -97,7 +98,7 @@ class SummitAPI:
         guild_id = record.get("guild_id")
         return await self.put(
             "/api/summit/records/shifts",
-            {"guildId": str(guild_id or ""), "records": [record]},
+            {"guildId": str(guild_id or ""), "shifts": [shift_payload(record)]},
             guild_id,
         )
 
@@ -105,6 +106,7 @@ class SummitAPI:
         guild_id = record.get("guild_id")
         return await self.put(
             "/api/summit/records/loas",
-            {"guild_id": str(guild_id or ""), "records": [record]},
+            {"guildId": str(guild_id or ""), "loas": [loa_payload(record)]},
             guild_id,
         )
+
