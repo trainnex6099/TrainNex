@@ -20,7 +20,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.tmp=tempfile.TemporaryDirectory();self.original=store.DB_PATH
         store.DB_PATH=Path(self.tmp.name)/'test.db';store.init_shift_db();store.init_loa_db()
         store.save_shift_type(GUILD,{'name':'Patrol'})
-        self.guild=SimpleNamespace(id=GUILD,fetch_member=AsyncMock())
+        self.guild=SimpleNamespace(id=GUILD,fetch_member=AsyncMock(),get_member=MagicMock(return_value=None))
         self.member=MagicMock(spec=discord.Member)
         self.member.id=USER;self.member.guild=self.guild;self.member.display_name='Deputy'
         self.member.top_role=SimpleNamespace(name='Deputy')
@@ -48,6 +48,25 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             await main.execute_portal_action({'action':'shift.start','guildId':str(GUILD)},str(USER))
         self.assertEqual(store.list_active_shifts(GUILD),[])
+
+    async def test_reset_requires_owner_even_for_employee(self):
+        with patch.object(main.HELPDESK,'config',AsyncMock(return_value={'ownerId':'987'})):
+            with self.assertRaises(PermissionError):
+                await main.execute_portal_action({'action':'system.reset','guildId':str(GUILD),'target':'shifts','confirmation':'RESET SHIFTS'},str(USER))
+
+    async def test_reset_retains_shift_history_and_saves_backup(self):
+        shift_type=store.get_shift_type_by_name(GUILD,'Patrol')
+        record=store.start_shift(GUILD,USER,'Deputy','Deputy',shift_type['id'])
+        with patch.object(main.HELPDESK,'config',AsyncMock(return_value={'ownerId':str(USER)})),patch.object(store,'DATA_DIR',Path(self.tmp.name)),patch.object(main.HELPDESK.store,'path',Path(self.tmp.name)/'helpdesk.db'):
+            result=await main.execute_portal_action({'action':'system.reset','guildId':str(GUILD),'target':'shifts','confirmation':'RESET SHIFTS'},str(USER))
+        self.assertEqual(store.get_shift(record['shift_id'])['status'],'ended')
+        self.assertTrue(result['historyRetained'])
+        self.assertTrue(list((Path(self.tmp.name)/'backups').glob('*/test.db')))
+
+    async def test_reset_requires_exact_confirmation(self):
+        with patch.object(main.HELPDESK,'config',AsyncMock(return_value={'ownerId':str(USER)})):
+            with self.assertRaises(ValueError):
+                await main.execute_portal_action({'action':'system.reset','guildId':str(GUILD),'target':'shifts','confirmation':'yes'},str(USER))
     async def test_foreign_loa_cannot_be_reviewed(self):
         r=store.create_loa_request('999','123','Other','1D',86400,'Leave')
         with self.assertRaises(ValueError):
