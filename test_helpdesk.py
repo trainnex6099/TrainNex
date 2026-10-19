@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 import discord
-from summit_helpdesk import TicketStore, SummitHelpdesk, IntakeModal, TOPICS, staff, can_open, transcript_html
+from summit_helpdesk import serialize_message, TicketStore, SummitHelpdesk, IntakeModal, TOPICS, staff, can_open, transcript_html
 
 OWNER = '123456789012345678'
 USER = '123456789012345679'
@@ -19,7 +19,7 @@ class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
         self.bot = MagicMock()
         self.service = SummitHelpdesk(self.bot, self.api, Path(self.tmp.name)/'tickets.db')
         self.service.config = AsyncMock(return_value={'ownerId':OWNER})
-        self.member = SimpleNamespace(id=int(USER), roles=[], display_name='Member')
+        self.member = SimpleNamespace(id=int(USER), roles=[], display_name='Member', display_avatar=SimpleNamespace(url='https://cdn.discordapp.com/embed/avatars/0.png'), bot=False)
         self.service.member = AsyncMock(return_value=self.member)
         self.record = self.service.store.create({'id':'case-1','guildId':'1516305981078900756','kind':'support','topic':'Other','openerId':USER,'openerName':'Member','staffRoleIds':[TEAM],'status':'open','openedAt':'today','channelId':'123','messages':[]})
         self.interaction = SimpleNamespace(guild=MagicMock(), user=self.member)
@@ -61,7 +61,7 @@ class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_close_preserves_messages_before_deleting_channel(self):
         channel=MagicMock(spec=discord.TextChannel)
-        message=SimpleNamespace(id=88,author=self.member,created_at=SimpleNamespace(isoformat=lambda:'today'),content='Private conversation',attachments=[])
+        message=SimpleNamespace(id=88,author=self.member,created_at=SimpleNamespace(isoformat=lambda:'today'),content='Private conversation',attachments=[],embeds=[],components=[])
         async def history(**kwargs):
             yield message
         channel.history=history
@@ -136,6 +136,35 @@ class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(staff(self.member,self.record,OWNER))
         self.member.roles=[SimpleNamespace(id=int(TEAM))]
         self.assertTrue(staff(self.member,self.record,OWNER))
+
+    async def test_public_support_log_contains_no_conversation_attachment(self):
+        channel=MagicMock(spec=discord.TextChannel)
+        channel.send=AsyncMock(return_value=SimpleNamespace(id=99,jump_url='https://discord.com/channels/1/2/99'))
+        self.bot.get_guild.return_value=SimpleNamespace(get_channel=lambda _:channel)
+        self.record.update(transcriptChannelId='987',messages=[{'content':'Private conversation'}],closeReason='Private reason',status='closed')
+        await self.service.log_ticket(self.record,{'ownerId':OWNER},True)
+        args=channel.send.await_args.kwargs
+        self.assertNotIn('file',args)
+        self.assertNotIn('Private reason',str(args['embed'].to_dict()))
+        self.assertNotIn('Private conversation',str(args['embed'].to_dict()))
+        self.assertFalse(self.service.store.get('case-1')['fullArchiveLogged'])
+
+    async def test_ia_opening_requires_ia_role_even_for_owner(self):
+        self.member.id=int(OWNER)
+        self.assertFalse(can_open(self.member,'ia',{'ownerId':OWNER,'ia':{'openerRoleIds':[TEAM]}}))
+
+    async def test_existing_discord_numbers_are_not_reused(self):
+        self.service.store.observe_channels([SimpleNamespace(name='ticket-21'),SimpleNamespace(name='🔴case-000004')])
+        next_support=self.service.store.create({**self.record,'id':'new-support'})
+        next_ia=self.service.store.create({**self.record,'id':'new-ia','kind':'ia'})
+        self.assertEqual((next_support['number'],next_ia['number']),(22,5))
+
+    async def test_bot_embeds_and_archived_controls_are_saved(self):
+        msg=SimpleNamespace(id=77,author=self.member,created_at=SimpleNamespace(isoformat=lambda:'today'),content='',attachments=[],embeds=[discord.Embed(title='Claimed ticket',description='Your ticket will be handled by IA')],components=[SimpleNamespace(children=[SimpleNamespace(label='Close')])])
+        saved=serialize_message(msg)
+        self.assertEqual(saved['embeds'][0]['title'],'Claimed ticket')
+        self.assertEqual(saved['controls'],['Close'])
+        self.assertIn('Claimed ticket',transcript_html({**self.record,'messages':[saved]}).decode())
 
 
 if __name__ == '__main__':
