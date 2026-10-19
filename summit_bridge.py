@@ -83,9 +83,17 @@ async def publish(api, guild_id, training=None):
     state = snapshot(guild_id)
     if training is not None:
         state['training'] = training_wire(training)
+    fingerprints=getattr(api,'_snapshot_fingerprints',{})
+    key=str(guild_id)
+    value=json.dumps({k:v for k,v in state.items() if k!='updatedAt'},sort_keys=True)
+    prior=fingerprints.get(key)
+    if prior and prior[0]==value and time.monotonic()-prior[1]<600:
+        return
     result = await api.put(PATH, state, guild_id)
     if not result.get('ok'):
         raise RuntimeError('Portal did not confirm the state backup')
+    fingerprints[key]=(value,time.monotonic())
+    api._snapshot_fingerprints=fingerprints
 
 
 async def restore(api, guild_id):
