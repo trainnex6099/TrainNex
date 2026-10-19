@@ -9,6 +9,7 @@ import html
 import io
 import json
 import os
+import re
 from pathlib import Path
 import sqlite3
 import discord
@@ -30,15 +31,26 @@ def staff(member, ticket, owner_id):
 
 
 def can_open(member, kind, config):
-    return kind == 'support' or str(member.id) == config.get('ownerId') or any(
+    return kind == 'support' or any(
         str(role.id) in config[kind].get('openerRoleIds', []) for role in member.roles)
+
+
+def serialize_message(message):
+    return {'id':str(message.id),'authorId':str(message.author.id),'authorName':message.author.display_name,
+            'avatarUrl':str(message.author.display_avatar.url),'bot':message.author.bot,
+            'createdAt':message.created_at.isoformat(),'content':getattr(message,'clean_content',message.content),
+            'attachments':[a.url for a in message.attachments],
+            'embeds':[e.to_dict() for e in message.embeds],
+            'controls':[c.label for row in message.components for c in getattr(row,'children',[]) if getattr(c,'label',None)]}
 
 
 def transcript_html(record):
     esc = lambda text: html.escape(str(text), quote=True)
+    def rich(message):
+        return ''.join('<section style="border-left:4px solid #2f946b;padding:1rem;margin-top:1rem"><b>' + esc(e.get('title','')) + '</b><pre>' + esc(e.get('description','')) + '</pre>' + ''.join('<b>'+esc(f.get('name',''))+'</b><pre>'+esc(f.get('value',''))+'</pre>' for f in e.get('fields',[])) + '</section>' for e in message.get('embeds',[]))
     rows = ''.join('<article><b>' + esc(m['authorName']) + '</b> <small>' + esc(m['createdAt']) +
                    '</small><pre>' + esc(m['content']) + '</pre>' +
-                   ''.join('<p>' + esc(a) + '</p>' for a in m.get('attachments', [])) + '</article>'
+                   rich(m) + ''.join('<p>' + esc(a) + '</p>' for a in m.get('attachments', [])) + '</article>'
                    for m in record.get('messages', []))
     return ('<!doctype html><meta charset="utf-8"><title>Summit ticket transcript</title>'
             '<style>body{font:16px Arial;margin:3rem;max-width:75rem;background:#f2f0e9;color:#17231d}'
@@ -120,6 +132,16 @@ class TicketStore:
             db.execute('INSERT OR IGNORE INTO tickets (number,id,record) VALUES (?,?,?)',
                        (record['number'], record['id'], json.dumps(record)))
             db.execute('UPDATE counters SET next_number=MAX(next_number,?) WHERE kind=?', (record['number']+1,record['kind']))
+
+    def advance(self, kind, number):
+        with self.connect() as db:
+            db.execute('UPDATE counters SET next_number=MAX(next_number,?) WHERE kind=?', (number,kind))
+
+    def observe_channels(self, channels):
+        for channel in channels:
+            match = re.search(r'(ticket|case)-(\d+)',channel.name)
+            if match:
+                self.advance('support' if match[1]=='ticket' else 'ia',int(match[2])+1)
 
 
 class IntakeModal(discord.ui.Modal):
@@ -331,10 +353,12 @@ class SummitHelpdesk:
             if sum(r['openerId'] == str(member.id) and r['status'] != 'closed' for r in self.store.all()) >= 3:
                 raise ValueError('You already have three open tickets. Please use an existing ticket.')
             guild = interaction.guild
+            # Continue the server's existing ticket sequence without reusing IDs.
+            self.store.observe_channels(guild.text_channels)
             category = guild.get_channel(int(panel['categoryId'])) if panel['categoryId'] else None
             if not isinstance(category, discord.CategoryChannel):
                 raise ValueError('The active-ticket category has not been configured correctly.')
-            if panel.get('transcriptChannelId'):
+            if kind == 'ia' and panel.get('transcriptChannelId'):
                 self.private_destination(guild, panel['transcriptChannelId'], panel['staffRoleIds'], config['ownerId'])
             record = existing or self.store.create({'id':str(interaction.id), 'guildId':str(GUILD_ID), 'kind':kind, 'topic':topic[:100], 'openerId':str(member.id), 'openerName':member.display_name, 'staffRoleIds':panel['staffRoleIds'], 'transcriptChannelId':panel['transcriptChannelId'], 'status':'opening', 'openedAt':now(), 'messages':[]})
             overwrites = {guild.default_role:discord.PermissionOverwrite(view_channel=False), guild.me:discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True), member:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,attach_files=True)}
@@ -358,8 +382,13 @@ class SummitHelpdesk:
             await self.publish_record(record)
             return record
 
-    def log_embed(self, record, closed):
+    def log_embed(self, record, closed, public=False):
         embed=discord.Embed(title='Ticket Closed' if closed else 'Ticket Opened',colour=0x2ECC71,timestamp=datetime.now(timezone.utc))
+        if public:
+            embed.add_field(name='Ticket ID',value=str(record['number']))
+            embed.description='The full conversation and case details are available to the ticket opener and authorized staff through the portal.'
+            embed.set_footer(text='Summit · WCSO Roleplay Support')
+            return embed
         fields=[('Ticket ID',str(record['number'])),('Opened By',f"{record['openerName']} ({record['openerId']})"),('Closed By',record.get('closedByName','Not closed')),('Open Time',record['openedAt']),('Claimed By',record.get('claimedByName','Unclaimed')),('Reason',record.get('closeReason') or 'No reason specified')]
         for name,value in fields:embed.add_field(name=name,value=value[:1024],inline=name!='Reason')
         embed.set_footer(text=f"Summit · {'Internal Affairs' if record['kind']=='ia' else record['topic']}")
@@ -369,14 +398,16 @@ class SummitHelpdesk:
         if not record.get('transcriptChannelId'):
             return
         guild=self.bot.get_guild(GUILD_ID)
-        channel=self.private_destination(guild,record['transcriptChannelId'],record['staffRoleIds'],config['ownerId'])
-        kwargs={'embed':self.log_embed(record,closed),'allowed_mentions':discord.AllowedMentions.none()}
+        public=record['kind']=='support'
+        channel=guild.get_channel(int(record['transcriptChannelId'])) if public else self.private_destination(guild,record['transcriptChannelId'],record['staffRoleIds'],config['ownerId'])
+        if not isinstance(channel,discord.TextChannel):raise ValueError('Configure a text channel for transcript notices.')
+        kwargs={'embed':self.log_embed(record,closed,public),'allowed_mentions':discord.AllowedMentions.none()}
         if closed:
-            kwargs['file']=discord.File(io.BytesIO(transcript_html(record)),filename=f"summit-{record['kind']}-{record['number']}.html")
+            if not public:kwargs['file']=discord.File(io.BytesIO(transcript_html(record)),filename=f"summit-{record['kind']}-{record['number']}.html")
             kwargs['view']=TranscriptActions(self,record['id'])
         message=await channel.send(**kwargs)
         if closed:
-            record.update(logMessageId=str(message.id),archiveUrl=message.jump_url)
+            record.update(logMessageId=str(message.id),archiveUrl=message.jump_url,fullArchiveLogged=not public)
             self.store.save(record)
             await self.publish_record(record)
         else:
@@ -441,7 +472,7 @@ class SummitHelpdesk:
         if record.get('transcriptChannelId') and not record.get('logMessageId'):
             raise ValueError('Save the transcript log before removing the ticket channel.')
         oversized = len(record.get('messages', [])) > 5000 or len(json.dumps({'ticket':record}).encode('utf-8')) > 950000
-        if oversized and not record.get('logMessageId'):
+        if oversized and not record.get('fullArchiveLogged'):
             raise ValueError('A full transcript channel is required for this large case. Its channel has been retained.')
         channel = self.bot.get_channel(int(record['channelId']))
         try:
@@ -473,14 +504,17 @@ class SummitHelpdesk:
                 channel=self.bot.get_channel(int(record['transcriptChannelId']))
                 if channel:
                     message=await channel.fetch_message(int(record['logMessageId']))
-                    await message.edit(embed=self.log_embed(record,True), attachments=[discord.File(io.BytesIO(transcript_html(record)), filename=f"summit-{record['kind']}-{record['number']}.html")])
+                    if record['kind']=='support':
+                        await message.edit(embed=self.log_embed(record,True,True))
+                    else:
+                        await message.edit(embed=self.log_embed(record,True), attachments=[discord.File(io.BytesIO(transcript_html(record)), filename=f"summit-{record['kind']}-{record['number']}.html")])
                 return
             if record['status']=='closed':raise ValueError('This ticket is already closed.')
             channel=interaction.guild.get_channel(int(record['channelId']))
             if not isinstance(channel,discord.TextChannel):raise ValueError('The ticket channel is unavailable.')
             messages={m['id']:m for m in record.get('messages',[])}
             async for m in channel.history(limit=None,oldest_first=True):
-                messages[str(m.id)]={'id':str(m.id),'authorName':m.author.display_name,'createdAt':m.created_at.isoformat(),'content':m.content,'attachments':[a.url for a in m.attachments]}
+                messages[str(m.id)]=serialize_message(m)
             record.update(messages=list(messages.values()),closeReason=reason or 'No reason specified',closedBy=str(member.id),closedByName=member.display_name,closedAt=now(),status='closed')
             await self.permissions(channel,record,False)
             self.store.save(record)
@@ -499,7 +533,8 @@ class SummitHelpdesk:
             if kind not in ('support','ia') or not config[kind]['enabled']:raise ValueError('Configure and enable this panel first.')
             panel=config[kind]
             if not panel['categoryId'] or not isinstance(guild.get_channel(int(panel['categoryId'])),discord.CategoryChannel):raise ValueError('Choose an active-ticket category.')
-            if panel['transcriptChannelId']:self.private_destination(guild,panel['transcriptChannelId'],panel['staffRoleIds'],config['ownerId'])
+            if kind=='ia' and panel['transcriptChannelId']:self.private_destination(guild,panel['transcriptChannelId'],panel['staffRoleIds'],config['ownerId'])
+            if kind=='support' and panel['transcriptChannelId'] and not isinstance(guild.get_channel(int(panel['transcriptChannelId'])),discord.TextChannel):raise ValueError('Configure the support transcript notice channel.')
             channel=guild.get_channel(int(panel['panelChannelId']))
             if not isinstance(channel,discord.TextChannel):raise ValueError('Opening panel channel is unavailable.')
             embed=discord.Embed(title='Open a ticket!' if kind=='support' else 'Open an IA investigation',description='Click the button, choose the reason in the pop-up, and submit to open a private ticket.' if kind=='support' else 'Authorized personnel can open a private Internal Affairs investigation.',colour=0x143E31)
