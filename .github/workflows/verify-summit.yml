@@ -14,5 +14,5 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: python -m unittest -q test_summit test_dispatch test_helpdesk
+      - run: python -m unittest -q test_summit test_dispatch test_helpdesk test_api_sync
       - run: python -m py_compile main.py summit_helpdesk.py

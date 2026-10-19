@@ -1,5 +1,6 @@
 import logging
 import os
+import json
 from typing import Any
 
 import aiohttp
@@ -15,6 +16,7 @@ class SummitAPI:
         self.base_url = os.getenv("SUMMIT_API_BASE_URL", "").strip().rstrip("/")
         self.secret = os.getenv("SUMMIT_API_SECRET", "").strip()
         self.timeout = aiohttp.ClientTimeout(total=15)
+        self._directory_fingerprints = {}
 
     @property
     def configured(self) -> bool:
@@ -79,20 +81,33 @@ class SummitAPI:
         return await self.request("PUT", path, guild_id=guild_id, payload=payload)
 
     async def sync_roles(self, guild_id: int, roles: list[dict[str, Any]]) -> Any:
-        return await self.put(
-            "/api/summit/discord/roles",
-            {"guildId": str(guild_id), "roles": roles},
-            guild_id,
-        )
+        return await self._sync_directory(guild_id,'roles',roles,('id','name','position','color','managed'))
+
+    async def _sync_directory(self, guild_id, kind, items, fields):
+        path='/api/summit/discord/'+kind
+        def fingerprint(values):
+            normalized=[{key:(bool(v.get(key)) if key=='managed' else v.get(key)) for key in fields} for v in values]
+            return json.dumps(sorted(normalized,key=lambda v:str(v['id'])),sort_keys=True)
+        key=(str(guild_id),kind)
+        desired=fingerprint(items)
+        if self._directory_fingerprints.get(key)==desired:
+            return {'ok':True,'unchanged':True}
+        if key not in self._directory_fingerprints:
+            # A restart must not rewrite an unchanged remote directory either.
+            existing=await self.get(path,guild_id)
+            if fingerprint(existing.get(kind,[]))==desired:
+                self._directory_fingerprints[key]=desired
+                return {'ok':True,'unchanged':True}
+        result=await self.put(path,{'guildId':str(guild_id),kind:items},guild_id)
+        if not result.get('ok'):
+            raise RuntimeError('Portal did not confirm the directory update')
+        self._directory_fingerprints[key]=desired
+        return result
 
     async def sync_channels(
         self, guild_id: int, channels: list[dict[str, Any]]
     ) -> Any:
-        return await self.put(
-            "/api/summit/discord/channels",
-            {"guildId": str(guild_id), "channels": channels},
-            guild_id,
-        )
+        return await self._sync_directory(guild_id,'channels',channels,('id','name','position','type','categoryId'))
 
     async def sync_shift_record(self, record: dict[str, Any]) -> Any:
         guild_id = record.get("guild_id")
@@ -109,4 +124,3 @@ class SummitAPI:
             {"guildId": str(guild_id or ""), "loas": [loa_payload(record)]},
             guild_id,
         )
-
