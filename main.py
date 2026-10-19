@@ -14,6 +14,9 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from summit_api import SummitAPI
 import summit_bridge
+from summit_helpdesk import SummitHelpdesk
+import summit_store
+from types import SimpleNamespace
 from summit_store import (
     init_db as init_summit_db,
     get_trainnex_config,
@@ -586,6 +589,7 @@ class SummitBot(commands.Bot):
         self.setup_complete = False
 
     async def setup_hook(self):
+        HELPDESK.setup()
         normalize_queue()
         save_data()
 
@@ -711,6 +715,7 @@ class SummitBot(commands.Bot):
 
 
 bot = SummitBot()
+HELPDESK = SummitHelpdesk(bot, SUMMIT_API)
 
 
 async def get_training_channel(channel_id: int) -> Optional[discord.TextChannel]:
@@ -2868,8 +2873,72 @@ async def publish_portal_state(guild_id):
     await summit_bridge.publish(SUMMIT_API, guild_id, training)
 
 
+RESET_LOCK = asyncio.Lock()
+
+
+async def execute_portal_reset(action, actor_id):
+    """Emergency controls retain history and take a local snapshot first."""
+    config = await HELPDESK.config()
+    if not config.get('ownerId') or actor_id != config['ownerId']:
+        raise PermissionError('Portal owner required')
+    target = action.get('target')
+    if target not in ('shifts', 'loas', 'tickets', 'trainnex-queue') or action.get('confirmation') != f'RESET {target.upper()}':
+        raise ValueError('Confirmation did not match')
+    if str(action.get('guildId')) != '1516305981078900756':
+        raise ValueError('Invalid WCSO server')
+    guild = bot.get_guild(1516305981078900756)
+    if guild is None or guild.id not in HYDRATED_GUILDS:
+        raise ValueError('Summit must finish restoring WCSO first')
+    owner = await guild.fetch_member(int(actor_id))
+    async with RESET_LOCK:
+        import sqlite3
+        import uuid
+        folder = summit_store.DATA_DIR / 'backups' / (time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8])
+        folder.mkdir(parents=True, exist_ok=False)
+        for source in (summit_store.DB_PATH, HELPDESK.store.path):
+            with sqlite3.connect(source, factory=summit_store.ManagedConnection) as origin, sqlite3.connect(folder / source.name, factory=summit_store.ManagedConnection) as destination:
+                origin.backup(destination)
+        atomic_write_json(folder / 'training.json', DATA)
+        count = 0
+        if target == 'shifts':
+            for current in list_active_shifts(guild.id):
+                record = end_shift(current['shift_id'], adjustment='Ended by portal owner emergency reset', adjusted_by=actor_id)
+                member = guild.get_member(int(record['user_id']))
+                if member:
+                    await _apply_shift_roles(member, get_shift_type(record['shift_type_id']) or {}, 'ended')
+                await _shift_log(guild, record, 'ended', owner)
+                await sync_shift_record_to_portal(record)
+                count += 1
+        elif target == 'loas':
+            records = list_active_loas(guild.id) + [r for r in list_pending_loas() if str(r['guild_id']) == str(guild.id)]
+            for current in records:
+                record = (deny_loa(current['loa_id'], actor_id, 'Cancelled by portal owner emergency reset') if current['status'] == 'pending' else end_loa(current['loa_id'], actor_id))
+                await _apply_loa_role(guild, int(record['user_id']), False)
+                await _loa_log(guild, record, 'denied' if current['status'] == 'pending' else 'ended_early')
+                await _edit_loa_request_message(guild, record, guild.get_member(int(record['user_id'])))
+                await sync_loa_record_to_portal(record)
+                count += 1
+        elif target == 'tickets':
+            for record in HELPDESK.store.all():
+                if record['status'] != 'closed' and record.get('channelId'):
+                    await HELPDESK.close(SimpleNamespace(guild=guild, user=owner), record['id'], 'Closed by portal owner emergency reset')
+                    count += 1
+        else:
+            async with DATA_LOCK:
+                count = len(DATA['queue'])
+                DATA['queue'] = []
+                save_data()
+            await publish_portal_state(TRAINING_SERVER_ID)
+        await publish_portal_state(guild.id)
+        return {'status': 'completed', 'target': target, 'affected': count, 'historyRetained': True, 'backupSaved': True}
+
+
 async def execute_portal_action(action, actor_id):
     """Portal actions use the same records and role/message helpers as Discord."""
+    if action.get('action') == 'helpdesk.publish':
+        return await HELPDESK.execute(action, actor_id)
+    if action.get('action') == 'system.reset':
+        return await execute_portal_reset(action, actor_id)
     guild_id = str(action.get('guildId', ''))
     if not guild_id.isdigit() or not actor_id.isdigit():
         raise ValueError('Invalid Discord identity')
@@ -3012,7 +3081,9 @@ async def summit_portal_commands_loop():
     if not SUMMIT_API.configured:
         return
     try:
+        await HELPDESK.restore()
         await summit_bridge.process(SUMMIT_API, execute_portal_action)
+        await HELPDESK.synchronize()
     except Exception as exc:
         log.warning('Portal command poll failed: %s', exc)
 
@@ -3106,4 +3177,3 @@ bot.tree.add_command(summit_setup)
 if __name__ == "__main__":
     log.info("Starting Summit...")
     bot.run(TOKEN)
-

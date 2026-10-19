@@ -1,0 +1,142 @@
+"""Private helpdesk flows with temporary storage and mocked Discord I/O."""
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+from unittest.mock import AsyncMock, MagicMock
+import discord
+from summit_helpdesk import TicketStore, SummitHelpdesk, IntakeModal, TOPICS, staff, can_open, transcript_html
+
+OWNER = '123456789012345678'
+USER = '123456789012345679'
+TEAM = '123456789012345680'
+
+
+class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.api = SimpleNamespace(configured=True, base_url='https://portal.example', put=AsyncMock(return_value={'ok':True}))
+        self.bot = MagicMock()
+        self.service = SummitHelpdesk(self.bot, self.api, Path(self.tmp.name)/'tickets.db')
+        self.service.config = AsyncMock(return_value={'ownerId':OWNER})
+        self.member = SimpleNamespace(id=int(USER), roles=[], display_name='Member')
+        self.service.member = AsyncMock(return_value=self.member)
+        self.record = self.service.store.create({'id':'case-1','guildId':'1516305981078900756','kind':'support','topic':'Other','openerId':USER,'openerName':'Member','staffRoleIds':[TEAM],'status':'open','openedAt':'today','channelId':'123','messages':[]})
+        self.interaction = SimpleNamespace(guild=MagicMock(), user=self.member)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    async def test_modal_contains_seven_required_topics(self):
+        modal = IntakeModal(self.service, 'support')
+        self.assertEqual([o.label for o in modal.choice.options], TOPICS)
+        self.assertEqual(modal.choice.min_values, 1)
+        self.assertEqual(modal.choice.max_values, 1)
+
+    async def test_ia_does_not_inherit_general_support_access(self):
+        config={'ownerId':OWNER,'ia':{'openerRoleIds':[TEAM]}}
+        self.assertTrue(can_open(self.member,'support',config))
+        self.assertFalse(can_open(self.member,'ia',config))
+        self.member.roles=[SimpleNamespace(id=int(TEAM))]
+        self.assertTrue(can_open(self.member,'ia',config))
+
+    async def test_opener_cannot_claim_staff_ticket(self):
+        with self.assertRaises(PermissionError):
+            await self.service.manage(self.interaction,'case-1','claim')
+        self.assertEqual(self.service.store.get('case-1')['status'],'open')
+
+    async def test_claim_cannot_be_taken_from_another_staff_member(self):
+        self.member.roles=[SimpleNamespace(id=int(TEAM))]
+        self.record.update(claimedBy=OWNER,status='claimed')
+        self.service.store.save(self.record)
+        with self.assertRaises(ValueError):
+            await self.service.manage(self.interaction,'case-1','claim')
+        self.assertEqual(self.service.store.get('case-1')['claimedBy'],OWNER)
+
+    async def test_unrelated_member_cannot_close(self):
+        self.member.id=987
+        with self.assertRaises(PermissionError):
+            await self.service.close(self.interaction,'case-1','')
+        self.api.put.assert_not_awaited()
+
+    async def test_close_preserves_messages_before_deleting_channel(self):
+        channel=MagicMock(spec=discord.TextChannel)
+        message=SimpleNamespace(id=88,author=self.member,created_at=SimpleNamespace(isoformat=lambda:'today'),content='Private conversation',attachments=[])
+        async def history(**kwargs):
+            yield message
+        channel.history=history
+        self.interaction.guild.get_channel.return_value=channel
+        self.service.permissions=AsyncMock()
+        self.service.log_ticket=AsyncMock()
+        self.service.update_controls=AsyncMock()
+        self.bot.get_channel.return_value=channel
+        channel.guild.id=1516305981078900756
+        await self.service.close(self.interaction,'case-1','Resolved')
+        stored=self.service.store.get('case-1')
+        self.assertEqual(stored['messages'][0]['content'],'Private conversation')
+        self.assertEqual(stored['status'],'closed')
+        self.service.permissions.assert_awaited_once()
+        self.assertFalse(self.service.permissions.await_args.args[2])
+        channel.delete.assert_awaited_once()
+        self.assertTrue(stored['channelDeleted'])
+
+    async def test_transcript_backup_failure_prevents_channel_deletion(self):
+        channel=MagicMock(spec=discord.TextChannel)
+        async def history(**kwargs):
+            if False:yield None
+        channel.history=history
+        self.interaction.guild.get_channel.return_value=channel
+        self.bot.get_channel.return_value=channel
+        self.service.permissions=AsyncMock()
+        self.service.log_ticket=AsyncMock()
+        self.api.put.side_effect=RuntimeError('offline')
+        with self.assertRaises(RuntimeError):
+            await self.service.close(self.interaction,'case-1','Resolved')
+        channel.delete.assert_not_awaited()
+        self.assertTrue(self.service.store.get('case-1')['pendingBackup'])
+
+    async def test_numbering_is_independent_and_ia_starts_after_four(self):
+        ia=self.service.store.create({**self.record,'id':'ia-1','kind':'ia'})
+        second=self.service.store.create({**self.record,'id':'support-2'})
+        next_ia=self.service.store.create({**self.record,'id':'ia-2','kind':'ia'})
+        self.assertEqual((self.record['number'],second['number']),(1,2))
+        self.assertEqual((ia['number'],next_ia['number']),(5,6))
+        reopened=TicketStore(self.service.store.path)
+        self.assertEqual(reopened.create({**self.record,'id':'ia-3','kind':'ia'})['number'],7)
+
+    async def test_large_portal_copy_retains_full_local_archive(self):
+        self.record['messages']=[{'content':'a'*1000000}]
+        self.service.store.save(self.record)
+        await self.service.publish_record(self.record)
+        remote=self.api.put.await_args.args[1]['ticket']
+        self.assertTrue(remote['transcriptTruncated'])
+        self.assertEqual(remote['messages'],[])
+        self.assertEqual(len(self.service.store.get('case-1')['messages'][0]['content']),1000000)
+
+    async def test_failed_backup_remains_pending(self):
+        self.api.put.return_value={'ok':False}
+        with self.assertRaises(RuntimeError):
+            await self.service.publish_record(self.record)
+        self.assertTrue(self.service.store.get('case-1')['pendingBackup'])
+
+    async def test_restore_is_idempotent_and_preserves_number(self):
+        other=TicketStore(Path(self.tmp.name)/'restore.db')
+        other.restore(self.record);other.restore(self.record)
+        self.assertEqual(len(other.all()),1)
+        self.assertEqual(other.get('case-1')['number'],self.record['number'])
+
+    async def test_html_transcript_escapes_message_content(self):
+        self.record['messages']=[{'authorName':'<script>','createdAt':'today','content':'<img src=x onerror=alert(1)>','attachments':[]}]
+        result=transcript_html(self.record).decode()
+        self.assertNotIn('<script>',result)
+        self.assertNotIn('<img',result)
+        self.assertIn('&lt;img',result)
+
+    async def test_owner_and_handling_roles_only(self):
+        self.assertFalse(staff(self.member,self.record,OWNER))
+        self.member.roles=[SimpleNamespace(id=int(TEAM))]
+        self.assertTrue(staff(self.member,self.record,OWNER))
+
+
+if __name__ == '__main__':
+    unittest.main()
