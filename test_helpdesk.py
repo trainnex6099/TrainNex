@@ -149,6 +149,18 @@ class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('Private conversation',str(args['embed'].to_dict()))
         self.assertFalse(self.service.store.get('case-1')['fullArchiveLogged'])
 
+    async def test_ia_log_uses_protected_link_without_downloadable_transcript(self):
+        channel=MagicMock(spec=discord.TextChannel)
+        channel.send=AsyncMock(return_value=SimpleNamespace(id=99,jump_url='https://discord.com/channels/1/2/99'))
+        self.bot.get_guild.return_value=SimpleNamespace()
+        self.service.private_destination=MagicMock(return_value=channel)
+        self.record.update(kind='ia',transcriptChannelId='987',messages=[{'content':'Private conversation'}],status='closed')
+        await self.service.log_ticket(self.record,{'ownerId':OWNER},True)
+        args=channel.send.await_args.kwargs
+        self.assertNotIn('file',args)
+        self.assertEqual(args['view'].children[0].url,'https://portal.example/tickets/case-1')
+        self.assertFalse(self.service.store.get('case-1')['fullArchiveLogged'])
+
     async def test_ia_opening_requires_ia_role_even_for_owner(self):
         self.member.id=int(OWNER)
         self.assertFalse(can_open(self.member,'ia',{'ownerId':OWNER,'ia':{'openerRoleIds':[TEAM]}}))
