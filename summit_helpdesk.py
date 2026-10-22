@@ -386,7 +386,7 @@ class SummitHelpdesk:
         embed=discord.Embed(title='Ticket Closed' if closed else 'Ticket Opened',colour=0x2ECC71,timestamp=datetime.now(timezone.utc))
         if public:
             embed.add_field(name='Ticket ID',value=str(record['number']))
-            embed.description='The full conversation and case details are available to the ticket opener and authorized staff through the portal.'
+            embed.description='Ticket transcripts are available only to WCSO Highranks through the protected portal link.'
             embed.set_footer(text='Summit · WCSO Roleplay Support')
             return embed
         fields=[('Ticket ID',str(record['number'])),('Opened By',f"{record['openerName']} ({record['openerId']})"),('Closed By',record.get('closedByName','Not closed')),('Open Time',record['openedAt']),('Claimed By',record.get('claimedByName','Unclaimed')),('Reason',record.get('closeReason') or 'No reason specified')]
@@ -403,11 +403,11 @@ class SummitHelpdesk:
         if not isinstance(channel,discord.TextChannel):raise ValueError('Configure a text channel for transcript notices.')
         kwargs={'embed':self.log_embed(record,closed,public),'allowed_mentions':discord.AllowedMentions.none()}
         if closed:
-            if not public:kwargs['file']=discord.File(io.BytesIO(transcript_html(record)),filename=f"summit-{record['kind']}-{record['number']}.html")
+            # All transcripts use the portal role check; never attach a reusable HTML copy.
             kwargs['view']=TranscriptActions(self,record['id'])
         message=await channel.send(**kwargs)
         if closed:
-            record.update(logMessageId=str(message.id),archiveUrl=message.jump_url,fullArchiveLogged=not public)
+            record.update(logMessageId=str(message.id),archiveUrl=message.jump_url,fullArchiveLogged=False)
             self.store.save(record)
             await self.publish_record(record)
         else:
@@ -507,7 +507,7 @@ class SummitHelpdesk:
                     if record['kind']=='support':
                         await message.edit(embed=self.log_embed(record,True,True))
                     else:
-                        await message.edit(embed=self.log_embed(record,True), attachments=[discord.File(io.BytesIO(transcript_html(record)), filename=f"summit-{record['kind']}-{record['number']}.html")])
+                        await message.edit(embed=self.log_embed(record,True))
                 return
             if record['status']=='closed':raise ValueError('This ticket is already closed.')
             channel=interaction.guild.get_channel(int(record['channelId']))
