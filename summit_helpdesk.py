@@ -563,4 +563,3 @@ class SummitHelpdesk:
             with self.store.connect() as db:db.execute('INSERT INTO panels VALUES (?,?,?) ON CONFLICT(kind) DO UPDATE SET channel_id=excluded.channel_id,message_id=excluded.message_id',(kind,str(channel.id),str(message.id)))
             return {'status':'panel published','channelId':str(channel.id)}
         raise ValueError('Unsupported helpdesk action.')
-

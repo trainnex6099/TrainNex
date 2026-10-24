@@ -3188,4 +3188,3 @@ bot.tree.add_command(summit_setup)
 if __name__ == "__main__":
     log.info("Starting Summit...")
     bot.run(TOKEN)
-
