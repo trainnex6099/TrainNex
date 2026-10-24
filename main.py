@@ -294,13 +294,19 @@ async def refresh_guild_records_from_portal(guild: discord.Guild) -> None:
         log.warning("Could not hydrate shift records for guild %s: %s", guild.id, exc)
 
 
-async def sync_guild_directory_to_portal(guild: discord.Guild) -> None:
+async def sync_guild_directory_to_portal(guild: discord.Guild, *, fresh=False) -> None:
     if not SUMMIT_API.configured:
         return
+    source_roles = await guild.fetch_roles() if fresh else guild.roles
+    source_channels = await guild.fetch_channels() if fresh else guild.channels
+    if fresh:
+        for kind in ('roles', 'channels'):
+            getattr(SUMMIT_API, '_directory_fingerprints', {}).pop((str(guild.id), kind), None)
+    failures = []
     roles = [
         {"id": str(role.id), "name": role.name, "position": int(role.position),
          "color": role.color.value, "managed": role.managed}
-        for role in guild.roles
+        for role in source_roles
         if not role.is_default()
     ]
     channels = [
@@ -311,18 +317,23 @@ async def sync_guild_directory_to_portal(guild: discord.Guild) -> None:
             "type": channel.type.value,
             "categoryId": str(channel.category_id) if getattr(channel, 'category_id', None) else None,
         }
-        for channel in guild.channels
+        for channel in source_channels
     ]
     try:
         await SUMMIT_API.sync_roles(guild.id, roles)
         replace_cache(guild.id, "role", roles)
     except Exception as exc:
+        failures.append("roles")
         log.warning("Could not sync Discord roles for guild %s: %s", guild.id, exc)
     try:
         await SUMMIT_API.sync_channels(guild.id, channels)
         replace_cache(guild.id, "channel", channels)
     except Exception as exc:
+        failures.append("channels")
         log.warning("Could not sync Discord channels for guild %s: %s", guild.id, exc)
+
+    if fresh and failures:
+        raise ValueError("Could not refresh " + " and ".join(failures) + ". Check Summit connectivity and try again.")
 
 
 async def sync_shift_record_to_portal(record: dict | None) -> None:
@@ -2954,7 +2965,7 @@ async def execute_portal_action(action, actor_id):
         raise PermissionError('WCSO employee role required')
     result = {}
     if name == 'directory.sync':
-        await sync_guild_directory_to_portal(guild)
+        await sync_guild_directory_to_portal(guild, fresh=True)
         return {'ok': True}
     elif name in ('shift.start', 'shift.break', 'shift.resume', 'shift.end'):
         current = get_active_shift(guild.id, member.id)

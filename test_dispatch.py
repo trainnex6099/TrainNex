@@ -35,6 +35,25 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         for p in reversed(self.patches):p.stop()
         main.HYDRATED_GUILDS.discard(GUILD);store.DB_PATH=self.original;self.tmp.cleanup()
+    async def test_manual_directory_refresh_fetches_live_discord_roles_and_channels(self):
+        self.guild.roles=[];self.guild.channels=[]
+        self.guild.fetch_roles=AsyncMock(return_value=[SimpleNamespace(id=11,name='Renamed role',position=2,color=SimpleNamespace(value=123),managed=False,is_default=lambda:False)])
+        self.guild.fetch_channels=AsyncMock(return_value=[SimpleNamespace(id=22,name='new-channel',position=1,type=SimpleNamespace(value=0),category_id=None)])
+        api=SimpleNamespace(configured=True,_directory_fingerprints={(str(GUILD),'roles'):'old'},sync_roles=AsyncMock(),sync_channels=AsyncMock())
+        with patch.object(main,'SUMMIT_API',api):
+            await main.sync_guild_directory_to_portal(self.guild,fresh=True)
+        self.guild.fetch_roles.assert_awaited_once();self.guild.fetch_channels.assert_awaited_once()
+        self.assertEqual(api.sync_roles.await_args.args[1][0]['name'],'Renamed role')
+        self.assertEqual(api.sync_channels.await_args.args[1][0]['name'],'new-channel')
+        self.assertNotIn((str(GUILD),'roles'),api._directory_fingerprints)
+
+    async def test_manual_directory_refresh_reports_failed_upload(self):
+        self.guild.fetch_roles=AsyncMock(return_value=[]);self.guild.fetch_channels=AsyncMock(return_value=[])
+        api=SimpleNamespace(configured=True,_directory_fingerprints={},sync_roles=AsyncMock(side_effect=RuntimeError('offline')),sync_channels=AsyncMock())
+        with patch.object(main,'SUMMIT_API',api):
+            with self.assertRaisesRegex(ValueError,'Could not refresh roles'):
+                await main.sync_guild_directory_to_portal(self.guild,fresh=True)
+
     async def test_portal_start_discord_end_same_shift(self):
         result=await main.execute_portal_action({'action':'shift.start','guildId':str(GUILD),'type':'Patrol'},str(USER))
         interaction=SimpleNamespace(guild=self.guild,user=self.member,response=SimpleNamespace(defer=AsyncMock()),edit_original_response=AsyncMock(),followup=SimpleNamespace(send=AsyncMock()))
