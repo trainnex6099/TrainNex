@@ -1,3 +1,4 @@
+import json
 import secrets
 import os
 import sqlite3
@@ -175,6 +176,7 @@ def init_shift_db():
         )""")
         _ensure_column(db, 'shift_settings', 'enabled', 'INTEGER DEFAULT 1')
         _ensure_column(db, "shift_types", "manage_channel_id", "TEXT DEFAULT ''")
+        _ensure_column(db, "shift_types", "permitted_role_ids", "TEXT NOT NULL DEFAULT '[]'")
         db.execute("""CREATE TABLE IF NOT EXISTS shifts (
             shift_id TEXT PRIMARY KEY,
             guild_id TEXT NOT NULL,
@@ -259,6 +261,9 @@ def get_shift_type_by_name(guild_id, name):
 def save_shift_type(guild_id, values):
     init_shift_db()
     type_id = values.get("id")
+    if type_id and 'permitted_role_ids' not in values:
+        previous = get_shift_type(type_id)
+        values = {**values, 'permitted_role_ids': json.loads(previous.get('permitted_role_ids') or '[]') if previous else []}
     default = 1 if values.get("is_default") else 0
     with connect() as db:
         if default:
@@ -266,7 +271,7 @@ def save_shift_type(guild_id, values):
         if type_id:
             db.execute(
                 """UPDATE shift_types
-                   SET name=?,on_shift_role_id=?,on_break_role_id=?,manage_channel_id=?,log_channel_id=?,is_default=?
+                   SET name=?,on_shift_role_id=?,on_break_role_id=?,manage_channel_id=?,log_channel_id=?,is_default=?,permitted_role_ids=?
                    WHERE id=? AND guild_id=?""",
                 (
                     values.get("name", "").strip(),
@@ -275,14 +280,15 @@ def save_shift_type(guild_id, values):
                     str(values.get("manage_channel_id", "")),
                     str(values.get("log_channel_id", "")),
                     default,
+                    json.dumps(values.get("permitted_role_ids", [])),
                     int(type_id),
                     str(guild_id),
                 ),
             )
             return int(type_id)
         cur = db.execute(
-            """INSERT INTO shift_types(guild_id,name,on_shift_role_id,on_break_role_id,manage_channel_id,log_channel_id,is_default)
-               VALUES(?,?,?,?,?,?,?)""",
+            """INSERT INTO shift_types(guild_id,name,on_shift_role_id,on_break_role_id,manage_channel_id,log_channel_id,is_default,permitted_role_ids)
+               VALUES(?,?,?,?,?,?,?,?)""",
             (
                 str(guild_id),
                 values.get("name", "").strip(),
@@ -291,6 +297,7 @@ def save_shift_type(guild_id, values):
                 str(values.get("manage_channel_id", "")),
                 str(values.get("log_channel_id", "")),
                 default,
+                json.dumps(values.get("permitted_role_ids", [])),
             ),
         )
         return cur.lastrowid
@@ -807,4 +814,3 @@ def list_due_loas(now=None):
 
 init_shift_db()
 init_loa_db()
-
