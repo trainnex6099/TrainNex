@@ -214,6 +214,7 @@ async def refresh_guild_config_from_portal(guild: discord.Guild) -> None:
                         item, "log_channel_id", "shift_log_channel_id",
                         "logChannelId", "shiftLogChannelId"
                     ),
+                    "permitted_role_ids": _pick(item, "permittedRoleIds", "permitted_role_ids", default=[]),
                     "is_default": bool(_pick(
                         item, "is_default", "isDefault", "default", default=False
                     )),
@@ -2122,14 +2123,26 @@ def _shift_manage_embed(
     return embed
 
 
+def can_use_shift_type(member, shift_type):
+    if shift_type.get('is_default'):
+        return True
+    permitted = shift_type.get('permitted_role_ids') or []
+    if isinstance(permitted, str):
+        try:
+            permitted = json.loads(permitted)
+        except (ValueError, TypeError):
+            return False
+    return isinstance(permitted, list) and any(str(role.id) in permitted for role in member.roles)
+
+
 class ShiftManageView(discord.ui.View):
-    def __init__(self, owner_id: int, shift_type_name: str, guild_id: int | None = None):
+    def __init__(self, owner_id: int, shift_type_name: str, guild_id: int | None = None, member=None):
         super().__init__(timeout=900)
         self.owner_id = owner_id
         self.shift_type_name = shift_type_name
         self.type_picker = None
         if guild_id is not None:
-            configured = list_shift_types(guild_id)
+            configured = [row for row in list_shift_types(guild_id) if member is None or can_use_shift_type(member, row)]
             selected = next((row for row in configured if row['name'] == shift_type_name), None)
             visible = configured[:25]
             if selected and selected not in visible:
@@ -2148,6 +2161,8 @@ class ShiftManageView(discord.ui.View):
         selected = get_shift_type(self.type_picker.values[0])
         if not selected or str(selected['guild_id']) != str(interaction.guild.id):
             return await interaction.response.send_message('This shift type is no longer configured. Run /shift manage again.', ephemeral=True)
+        if not can_use_shift_type(interaction.user, selected):
+            return await interaction.response.send_message('A permitted role is required for this shift type.', ephemeral=True)
         self.shift_type_name = selected['name']
         self.sync_state(None)
         await interaction.response.edit_message(embed=_shift_manage_embed(interaction.user, self.shift_type_name), view=self)
@@ -2182,6 +2197,8 @@ class ShiftManageView(discord.ui.View):
                 f"The **{self.shift_type_name}** shift type is not configured in Summit yet.",
                 ephemeral=True,
             )
+        if not can_use_shift_type(interaction.user, shift_type):
+            return await interaction.followup.send('A permitted role is required for this shift type.', ephemeral=True)
         channel_id = str(shift_type.get('manage_channel_id') or '')
         if channel_id.isdigit() and interaction.channel_id != int(channel_id):
             return await interaction.followup.send(f'Use `/shift manage` in <#{channel_id}> for this shift type.', ephemeral=True)
@@ -2286,7 +2303,7 @@ async def shift_manage(interaction: discord.Interaction, type: str | None = None
 
     await interaction.response.defer(ephemeral=True)
     selected = active["shift_type_name"] if active else type
-    view = ShiftManageView(interaction.user.id, selected, interaction.guild.id)
+    view = ShiftManageView(interaction.user.id, selected, interaction.guild.id, interaction.user)
     view.sync_state(active)
     await interaction.followup.send(
         embed=_shift_manage_embed(interaction.user, selected, active),
@@ -2301,7 +2318,7 @@ async def shift_type_autocomplete(interaction: discord.Interaction, current: str
         return []
     return [app_commands.Choice(name=row['name'][:100], value=row['name'])
             for row in list_shift_types(interaction.guild.id)
-            if current.casefold() in row['name'].casefold()][:25]
+            if current.casefold() in row['name'].casefold() and can_use_shift_type(interaction.user, row)][:25]
 
 
 @shift.command(name="active", description="View staff who are currently on shift.")
@@ -3018,6 +3035,8 @@ async def execute_portal_action(action, actor_id):
             shift_type = get_shift_type_by_name(guild.id, str(action.get('type', 'Patrol')))
             if not shift_type:
                 raise ValueError('Shift type is not configured')
+            if not can_use_shift_type(member, shift_type):
+                raise PermissionError('A permitted role is required for this shift type')
             record = start_shift(guild.id, member.id, member.display_name, member.top_role.name, shift_type['id'])
             event = 'started'
         else:

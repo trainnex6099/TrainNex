@@ -16,9 +16,24 @@ USER = 123456789012345678
 
 
 class DispatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restricted_shift_uses_live_roles_and_preserves_permissions(self):
+        type_id=store.save_shift_type(GUILD,{'name':'SRT','permitted_role_ids':['999999999999999999']})
+        action={'action':'shift.start','guildId':str(GUILD),'type':'SRT'}
+        with self.assertRaises(PermissionError):
+            await main.execute_portal_action(action,str(USER))
+        self.assertIsNone(store.get_active_shift(GUILD,USER))
+        choices=await main.shift_type_autocomplete(SimpleNamespace(guild=self.guild,user=self.member),'SRT')
+        self.assertEqual(choices,[])
+        self.member.roles.append(SimpleNamespace(id=999999999999999999))
+        self.assertTrue(main.can_use_shift_type(self.member,store.get_shift_type(type_id)))
+        await main.execute_portal_action(action,str(USER))
+        self.assertEqual(store.get_active_shift(GUILD,USER)['shift_type_name'],'SRT')
+        store.save_shift_type(GUILD,{'id':type_id,'name':'SRT edited'})
+        self.assertTrue(main.can_use_shift_type(self.member,store.get_shift_type(type_id)))
+
     async def test_shift_type_autocomplete_and_panel(self):
-        store.save_shift_type(GUILD, {'name':'Traffic Enforcement'})
-        interaction=SimpleNamespace(guild=self.guild)
+        store.save_shift_type(GUILD, {'name':'Traffic Enforcement','permitted_role_ids':['1516647746025558017']})
+        interaction=SimpleNamespace(guild=self.guild,user=self.member)
         choices=await main.shift_type_autocomplete(interaction,'traffic')
         self.assertEqual([choice.value for choice in choices],['Traffic Enforcement'])
         self.assertEqual(await main.shift_type_autocomplete(SimpleNamespace(guild=None),''),[])
@@ -43,7 +58,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.original=store.DB_PATH
         store.DB_PATH=Path(self.tmp.name)/'test.db';store.init_shift_db();store.init_loa_db()
-        store.save_shift_type(GUILD,{'name':'Patrol'})
+        store.save_shift_type(GUILD,{'name':'Patrol','is_default':True})
         self.guild=SimpleNamespace(id=GUILD,fetch_member=AsyncMock(),get_member=MagicMock(return_value=None))
         self.member=MagicMock(spec=discord.Member)
         self.member.id=USER;self.member.guild=self.guild;self.member.display_name='Deputy'
