@@ -2123,10 +2123,34 @@ def _shift_manage_embed(
 
 
 class ShiftManageView(discord.ui.View):
-    def __init__(self, owner_id: int, shift_type_name: str):
+    def __init__(self, owner_id: int, shift_type_name: str, guild_id: int | None = None):
         super().__init__(timeout=900)
         self.owner_id = owner_id
         self.shift_type_name = shift_type_name
+        self.type_picker = None
+        if guild_id is not None:
+            configured = list_shift_types(guild_id)
+            selected = next((row for row in configured if row['name'] == shift_type_name), None)
+            visible = configured[:25]
+            if selected and selected not in visible:
+                visible = visible[:24] + [selected]
+            if visible:
+                self.type_picker = discord.ui.Select(placeholder='Choose a shift type', row=1, options=[
+                    discord.SelectOption(label=row['name'][:100], value=str(row['id']), default=row['name'] == shift_type_name)
+                    for row in visible
+                ])
+                self.type_picker.callback = self.select_type
+                self.add_item(self.type_picker)
+
+    async def select_type(self, interaction: discord.Interaction):
+        if get_active_shift(interaction.guild.id, interaction.user.id):
+            return await interaction.response.send_message('End your current shift before selecting another type.', ephemeral=True)
+        selected = get_shift_type(self.type_picker.values[0])
+        if not selected or str(selected['guild_id']) != str(interaction.guild.id):
+            return await interaction.response.send_message('This shift type is no longer configured. Run /shift manage again.', ephemeral=True)
+        self.shift_type_name = selected['name']
+        self.sync_state(None)
+        await interaction.response.edit_message(embed=_shift_manage_embed(interaction.user, self.shift_type_name), view=self)
 
     async def interaction_check(self, interaction: discord.Interaction):
         if interaction.user.id != self.owner_id:
@@ -2141,6 +2165,11 @@ class ShiftManageView(discord.ui.View):
         self.pause_btn.disabled = active is None
         self.end_btn.disabled = active is None
         self.pause_btn.label = "Resume" if active and active["status"] == "break" else "Pause"
+        if self.type_picker:
+            self.type_picker.disabled = active is not None
+            for option in self.type_picker.options:
+                row = get_shift_type(option.value)
+                option.default = bool(row and row['name'] == self.shift_type_name)
 
     @discord.ui.button(label="Start", emoji="▶️", style=discord.ButtonStyle.success)
     async def start_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2153,6 +2182,9 @@ class ShiftManageView(discord.ui.View):
                 f"The **{self.shift_type_name}** shift type is not configured in Summit yet.",
                 ephemeral=True,
             )
+        channel_id = str(shift_type.get('manage_channel_id') or '')
+        if channel_id.isdigit() and interaction.channel_id != int(channel_id):
+            return await interaction.followup.send(f'Use `/shift manage` in <#{channel_id}> for this shift type.', ephemeral=True)
         try:
             shift = start_shift(
                 interaction.guild.id,
@@ -2234,6 +2266,9 @@ async def shift_manage(interaction: discord.Interaction, type: str | None = None
             "Use this command in a server.", ephemeral=True
         )
 
+    active = get_active_shift(interaction.guild.id, interaction.user.id)
+    if active:
+        type = active['shift_type_name']
     if type is None:
         configured = list_shift_types(interaction.guild.id)
         default_type = next((row for row in configured if row.get('is_default')), configured[0] if configured else None)
@@ -2250,15 +2285,23 @@ async def shift_manage(interaction: discord.Interaction, type: str | None = None
             )
 
     await interaction.response.defer(ephemeral=True)
-    active = get_active_shift(interaction.guild.id, interaction.user.id)
     selected = active["shift_type_name"] if active else type
-    view = ShiftManageView(interaction.user.id, selected)
+    view = ShiftManageView(interaction.user.id, selected, interaction.guild.id)
     view.sync_state(active)
     await interaction.followup.send(
         embed=_shift_manage_embed(interaction.user, selected, active),
         view=view,
         ephemeral=True,
     )
+
+
+@shift_manage.autocomplete('type')
+async def shift_type_autocomplete(interaction: discord.Interaction, current: str):
+    if interaction.guild is None:
+        return []
+    return [app_commands.Choice(name=row['name'][:100], value=row['name'])
+            for row in list_shift_types(interaction.guild.id)
+            if current.casefold() in row['name'].casefold()][:25]
 
 
 @shift.command(name="active", description="View staff who are currently on shift.")

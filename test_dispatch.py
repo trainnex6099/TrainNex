@@ -16,6 +16,30 @@ USER = 123456789012345678
 
 
 class DispatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shift_type_autocomplete_and_panel(self):
+        store.save_shift_type(GUILD, {'name':'Traffic Enforcement'})
+        interaction=SimpleNamespace(guild=self.guild)
+        choices=await main.shift_type_autocomplete(interaction,'traffic')
+        self.assertEqual([choice.value for choice in choices],['Traffic Enforcement'])
+        self.assertEqual(await main.shift_type_autocomplete(SimpleNamespace(guild=None),''),[])
+        view=main.ShiftManageView(USER,'Patrol',GUILD)
+        self.assertEqual([o.label for o in view.type_picker.options],['Patrol','Traffic Enforcement'])
+        view.sync_state(None)
+        self.assertFalse(view.type_picker.disabled)
+        view.sync_state({'status':'active'})
+        self.assertTrue(view.type_picker.disabled)
+        self.assertTrue(view.start_btn.disabled)
+        self.assertFalse(view.end_btn.disabled)
+
+    async def test_shift_type_cannot_switch_during_active_shift(self):
+        record=store.start_shift(GUILD,USER,'Deputy','Deputy',store.get_shift_type_by_name(GUILD,'Patrol')['id'])
+        view=main.ShiftManageView(USER,'Patrol',GUILD)
+        response=SimpleNamespace(send_message=AsyncMock(),edit_message=AsyncMock())
+        await view.select_type(SimpleNamespace(guild=self.guild,user=self.member,response=response))
+        response.send_message.assert_awaited_once()
+        response.edit_message.assert_not_awaited()
+        self.assertEqual(store.get_active_shift(GUILD,USER)['shift_id'],record['shift_id'])
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.original=store.DB_PATH
         store.DB_PATH=Path(self.tmp.name)/'test.db';store.init_shift_db();store.init_loa_db()
