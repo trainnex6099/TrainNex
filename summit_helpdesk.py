@@ -226,14 +226,18 @@ class ReasonModal(discord.ui.Modal):
 class TicketActions(discord.ui.View):
     def __init__(self, service, ticket_id, closed=False):
         super().__init__(timeout=None)
-        for action, label, style in [('claim', 'Claim ticket', discord.ButtonStyle.primary), ('close', 'Close ticket', discord.ButtonStyle.danger), ('reopen', 'Reopen ticket', discord.ButtonStyle.secondary)]:
-            button = discord.ui.Button(label=label, style=style, custom_id=f'summit:{action}:{ticket_id}', disabled=(action != 'reopen' if closed else action == 'reopen'))
+        for action, label, emoji, style in ([('reopen', 'Reopen ticket', '🔓', discord.ButtonStyle.secondary)] if closed else [('close-now', 'Close', '🔒', discord.ButtonStyle.danger), ('close', 'Close With Reason', '🔒', discord.ButtonStyle.danger), ('claim', 'Claim', '🙋', discord.ButtonStyle.primary)]):
+            button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f'summit:{action}:{ticket_id}')
             async def callback(interaction, selected=action):
                 if selected == 'close':
                     await interaction.response.send_modal(ReasonModal(service, ticket_id))
                     return
                 await interaction.response.defer(ephemeral=True, thinking=True)
                 try:
+                    if selected == 'close-now':
+                        await service.close(interaction, ticket_id, '')
+                        await interaction.followup.send('Ticket closed and transcript saved.', ephemeral=True)
+                        return
                     await service.manage(interaction, ticket_id, selected)
                     await interaction.followup.send('Ticket claimed.' if selected == 'claim' else 'Ticket reopened.', ephemeral=True)
                 except (ValueError, PermissionError) as exc:
@@ -253,7 +257,7 @@ class TranscriptActions(discord.ui.View):
             await interaction.response.send_modal(ReasonModal(service, ticket_id, edit=True, log_message_id=str(interaction.message.id)))
         button.callback = edit
         self.add_item(button)
-        reopen = discord.ui.Button(label='Reopen ticket', style=discord.ButtonStyle.secondary, custom_id=f'summit:reopen:{ticket_id}')
+        reopen = discord.ui.Button(label='Reopen ticket', emoji='🔓', style=discord.ButtonStyle.secondary, custom_id=f'summit:reopen:{ticket_id}')
         async def reopen_ticket(interaction):
             await interaction.response.defer(ephemeral=True, thinking=True)
             try:
@@ -325,14 +329,15 @@ class SummitHelpdesk:
         for candidate in self.store.all():
             async with self.lock(candidate['id']):
                 record = self.store.get(candidate['id'])
-                if not record.get('pendingBackup') and not (record['status'] == 'closed' and not record.get('channelDeleted')):
+                refresh_controls = record['status'] in ('open','claimed') and record.get('controlVersion') != 2
+                if not refresh_controls and not record.get('pendingBackup') and not (record['status'] == 'closed' and not record.get('channelDeleted')):
                     continue
                 if config is None:
                     config = await self.config()
                 if record['status'] == 'closed' and not record.get('logMessageId'):
                     await self.log_ticket(record, config, True)
-                elif record['status'] in ('open', 'claimed') and not record.get('openLogMessageId'):
-                    await self.log_ticket(record, config, False)
+                if refresh_controls:
+                    await self.update_controls(record)
                 await self.publish_record(record)
                 if record['status'] == 'closed':
                     await self.archive_channel(record)
@@ -389,27 +394,36 @@ class SummitHelpdesk:
                 channel = await guild.create_text_channel(f"{'case' if kind=='ia' else 'ticket'}-{record['number']}",category=category,overwrites=overwrites,topic=f"summit-ticket:{record['id']}",reason='Summit ticket requested by member')
             record.update(channelId=str(channel.id),categoryId=str(category.id),status='open')
             self.store.save(record)
-            embed = discord.Embed(title=f"{'IA investigation' if kind=='ia' else 'Support ticket'} #{record['number']}",description=f"**Topic:** {record['topic']}\nExplain what you need below. Do not share passwords or account credentials.",colour=0x143E31)
-            message = await channel.send(embed=embed,view=TicketActions(self,record['id']),allowed_mentions=discord.AllowedMentions.none())
+            mentions = ' '.join(f'<@&{role}>' for role in record['staffRoleIds'])
+            message = await channel.send(content=mentions or None,embeds=self.intake_embeds(record),view=TicketActions(self,record['id']),allowed_mentions=discord.AllowedMentions(everyone=False,users=False,roles=[discord.Object(id=int(role)) for role in record['staffRoleIds']]))
             record['controlMessageId'] = str(message.id)
+            record['controlVersion'] = 2
             self.store.save(record)
-            await self.log_ticket(record, config, closed=False)
             await self.publish_record(record)
             return record
 
+    def intake_embeds(self, record):
+        greeting=discord.Embed(description='Thank you for contacting support.\nPlease describe your issue and wait for a response.' if record['kind']=='support' else 'Internal Affairs intake is ready.\nPlease provide the details of this investigation below.',colour=0x143E31)
+        greeting.set_footer(text='Summit · Whatcom County Sheriff’s Office Roleplay')
+        topic=discord.Embed(title='Support' if record['kind']=='support' else 'Internal Affairs',description=record['topic'],colour=0x143E31)
+        topic.set_footer(text=f"Ticket #{record['number']} · " + (f"Claimed by {record['claimedByName']}" if record.get('claimedByName') else 'Awaiting staff'))
+        return [greeting,topic]
+
     def log_embed(self, record, closed, public=False):
-        embed=discord.Embed(title='Ticket Closed' if closed else 'Ticket Opened',colour=0x2ECC71,timestamp=datetime.now(timezone.utc))
+        embed=discord.Embed(title='🔒 Ticket Closed' if closed else 'Ticket Opened',colour=0x2ECC71,timestamp=datetime.now(timezone.utc))
         if public:
-            embed.add_field(name='Ticket ID',value=str(record['number']))
+            embed.add_field(name='🌐 Ticket ID',value=str(record['number']))
             embed.description='Ticket transcripts are available only to WCSO Highranks through the protected portal link.'
             embed.set_footer(text='Summit · WCSO Roleplay Support')
             return embed
-        fields=[('Ticket ID',str(record['number'])),('Opened By',f"{record['openerName']} ({record['openerId']})"),('Closed By',record.get('closedByName','Not closed')),('Open Time',record['openedAt']),('Claimed By',record.get('claimedByName','Unclaimed')),('Reason',record.get('closeReason') or 'No reason specified')]
-        for name,value in fields:embed.add_field(name=name,value=value[:1024],inline=name!='Reason')
+        fields=[('🌐 Ticket ID',str(record['number'])),('👤 Opened By',f"<@{record['openerId']}>"),('🔒 Closed By',f"<@{record['closedBy']}>" if record.get('closedBy') else record.get('closedByName','Unknown')),('🕒 Open Time',record['openedAt']),('🙋 Claimed By',f"<@{record['claimedBy']}>" if record.get('claimedBy') else 'Unclaimed'),('📝 Reason',record.get('closeReason') or 'No reason specified')]
+        for name,value in fields:embed.add_field(name=name,value=value[:1024],inline=not name.endswith('Reason'))
         embed.set_footer(text=f"Summit · {'Internal Affairs' if record['kind']=='ia' else record['topic']}")
         return embed
 
     async def log_ticket(self, record, config, closed):
+        if not closed or record.get('status') != 'closed':
+            return
         if not record.get('transcriptChannelId'):
             return
         guild=self.bot.get_guild(GUILD_ID)
@@ -454,7 +468,7 @@ class SummitHelpdesk:
                         role=guild.get_role(int(role_id))
                         if role and role!=guild.default_role:overwrites[role]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,attach_files=True)
                     channel=await guild.create_text_channel(f"{'case' if record['kind']=='ia' else 'ticket'}-{record['number']}",category=category,overwrites=overwrites,topic=f"summit-ticket:{record['id']}",reason='Summit case reopened by staff')
-                    controls=await channel.send('Previous conversation is preserved in the online transcript.',view=TicketActions(self,record['id']),allowed_mentions=discord.AllowedMentions.none())
+                    controls=await channel.send('Previous closed conversation is retained and will be included when this ticket closes again.',view=TicketActions(self,record['id']),allowed_mentions=discord.AllowedMentions.none())
                     record.update(channelId=str(channel.id),controlMessageId=str(controls.id))
                 await self.permissions(channel,record,True)
                 record.setdefault('closures',[]).append({key:record.get(key) for key in ('closedAt','closedBy','closedByName','closeReason','logMessageId','archiveUrl')})
@@ -476,7 +490,9 @@ class SummitHelpdesk:
         if channel and record.get('controlMessageId'):
             try:
                 message=await channel.fetch_message(int(record['controlMessageId']))
-                await message.edit(view=TicketActions(self,record['id'],record['status']=='closed'))
+                await message.edit(embeds=self.intake_embeds(record),view=TicketActions(self,record['id'],record['status']=='closed'))
+                record['controlVersion'] = 2
+                self.store.save(record)
             except discord.NotFound:
                 pass
 

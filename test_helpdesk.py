@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 import discord
-from summit_helpdesk import serialize_message, TicketStore, SummitHelpdesk, IntakeModal, TOPICS, staff, can_open, transcript_html, opening_embed
+from summit_helpdesk import serialize_message, TicketStore, SummitHelpdesk, IntakeModal, TOPICS, staff, can_open, transcript_html, opening_embed, TicketActions
 
 OWNER = '123456789012345678'
 USER = '123456789012345679'
@@ -13,6 +13,39 @@ TEAM = '123456789012345680'
 
 
 class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
+    async def test_open_and_claimed_tickets_never_post_transcript_notices(self):
+        channel=MagicMock(spec=discord.TextChannel)
+        channel.send=AsyncMock()
+        self.bot.get_guild.return_value=SimpleNamespace(get_channel=lambda _:channel)
+        for status in ('open','claimed'):
+            self.record.update(status=status,transcriptChannelId='987')
+            await self.service.log_ticket(self.record,{'ownerId':OWNER},False)
+            await self.service.log_ticket(self.record,{'ownerId':OWNER},True)
+        channel.send.assert_not_awaited()
+        self.api.put.assert_not_awaited()
+
+    async def test_open_ticket_sync_only_backs_up_metadata(self):
+        self.service.restore=AsyncMock()
+        self.service.log_ticket=AsyncMock()
+        self.service.archive_channel=AsyncMock()
+        self.service.update_controls=AsyncMock()
+        await self.service.synchronize()
+        self.service.log_ticket.assert_not_awaited()
+        self.service.archive_channel.assert_not_awaited()
+        self.assertEqual(self.api.put.await_args.args[1]['ticket']['messages'],[])
+
+    async def test_ticket_controls_and_two_embed_layout(self):
+        view=TicketActions(self.service,'case-1')
+        self.assertEqual([button.label for button in view.children],['Close','Close With Reason','Claim'])
+        self.service.close=AsyncMock()
+        interaction=SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()),followup=SimpleNamespace(send=AsyncMock()))
+        await view.children[0].callback(interaction)
+        self.service.close.assert_awaited_once_with(interaction,'case-1','')
+        embeds=self.service.intake_embeds({**self.record,'topic':'Partnership assistance'})
+        self.assertEqual(len(embeds),2)
+        self.assertIn('Thank you for contacting support',embeds[0].description)
+        self.assertEqual(embeds[1].description,'Partnership assistance')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.api = SimpleNamespace(configured=True, base_url='https://portal.example', put=AsyncMock(return_value={'ok':True}))
