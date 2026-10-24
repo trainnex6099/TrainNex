@@ -2142,7 +2142,7 @@ class ShiftManageView(discord.ui.View):
         self.end_btn.disabled = active is None
         self.pause_btn.label = "Resume" if active and active["status"] == "break" else "Pause"
 
-    @discord.ui.button(label="Start", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Start", emoji="▶️", style=discord.ButtonStyle.success)
     async def start_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         if not get_shift_settings(interaction.guild.id).get('enabled', 1):
@@ -2173,7 +2173,7 @@ class ShiftManageView(discord.ui.View):
             view=self,
         )
 
-    @discord.ui.button(label="Pause", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Pause", emoji="⏸️", style=discord.ButtonStyle.secondary)
     async def pause_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         shift = get_active_shift(interaction.guild.id, interaction.user.id)
@@ -2202,7 +2202,7 @@ class ShiftManageView(discord.ui.View):
             view=self,
         )
 
-    @discord.ui.button(label="End", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="End", emoji="⏹️", style=discord.ButtonStyle.danger)
     async def end_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         shift = get_active_shift(interaction.guild.id, interaction.user.id)
@@ -2266,7 +2266,7 @@ async def shift_active(interaction: discord.Interaction):
     if interaction.guild is None:
         return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
     rows = list_active_shifts(interaction.guild.id)
-    embed = discord.Embed(title="Active Shifts", color=discord.Color.blue())
+    embed = discord.Embed(title="🕒 Active Shifts", color=discord.Color.blue())
     _wcso_brand(embed, interaction.guild)
     if not rows:
         embed.description = "There are no active shifts."
@@ -2291,7 +2291,7 @@ async def shift_board(
         return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
     selected = type.value if type else None
     rows = shift_leaderboard(interaction.guild.id, limit=25, shift_type_name=selected)
-    embed = discord.Embed(title="Shift Leaderboard", color=discord.Color.blue())
+    embed = discord.Embed(title="🏆 Shift Leaderboard", color=discord.Color.blue())
     _wcso_brand(embed, interaction.guild)
     if not rows:
         embed.description = "No shift data yet."
@@ -2381,7 +2381,7 @@ def _loa_user_author(embed: discord.Embed, user: discord.abc.User):
 
 def _loa_manage_embed(member: discord.Member) -> discord.Embed:
     history = list_user_loas(member.guild.id, member.id, limit=5)
-    embed = discord.Embed(title="Manage Leave of Absences", color=discord.Color.blue())
+    embed = discord.Embed(title="📅 Manage Leave of Absences", color=discord.Color.blue())
     _loa_user_author(embed, member)
     if history:
         lines = []
@@ -2398,7 +2398,7 @@ def _loa_manage_embed(member: discord.Member) -> discord.Embed:
 
 def _loa_history_embed(member: discord.Member) -> discord.Embed:
     history = list_user_loas(member.guild.id, member.id, limit=25)
-    embed = discord.Embed(title="Leave of Absence History", color=discord.Color.blue())
+    embed = discord.Embed(title="📋 Leave of Absence History", color=discord.Color.blue())
     _loa_user_author(embed, member)
     if not history:
         embed.description = "No leave of absence history."
@@ -2417,7 +2417,7 @@ def _loa_history_embed(member: discord.Member) -> discord.Embed:
 
 
 def _loa_request_embed(guild: discord.Guild, loa: dict, user: discord.abc.User) -> discord.Embed:
-    embed = discord.Embed(title="Leave of Absence Request", color=discord.Color.gold())
+    embed = discord.Embed(title="📅 Leave of Absence Request", color=discord.Color.gold())
     _loa_user_author(embed, user)
     previous = max(0, len(list_user_loas(guild.id, int(loa["user_id"]), limit=100)) - 1)
     embed.add_field(name="Reason", value=loa["reason"], inline=False)
@@ -2501,7 +2501,7 @@ async def _send_loa_dm(user: discord.abc.User, guild: discord.Guild, loa: dict, 
     try:
         if status == "pending":
             embed = discord.Embed(
-                title="Leave of Absence Pending",
+                title="⏳ Leave of Absence Pending",
                 description=(
                     "Your leave of absence has been submitted to management for approval.\n"
                     f"If approved, it will end at approximately <t:{loa['end_at']}:F> (<t:{loa['end_at']}:R>).\n"
@@ -2511,7 +2511,7 @@ async def _send_loa_dm(user: discord.abc.User, guild: discord.Guild, loa: dict, 
             )
         elif status == "approved":
             embed = discord.Embed(
-                title="Leave of Absence Approved",
+                title="✅ Leave of Absence Approved",
                 description=(
                     f"Your leave of absence is set to end at approximately <t:{loa['end_at']}:F> "
                     f"(<t:{loa['end_at']}:R>).\n"
@@ -2521,7 +2521,7 @@ async def _send_loa_dm(user: discord.abc.User, guild: discord.Guild, loa: dict, 
             )
         elif status == "denied":
             embed = discord.Embed(
-                title="Leave of Absence Denied",
+                title="❌ Leave of Absence Denied",
                 description=(
                     f"If you believe this was a mistake, contact **{guild.name}** management.\n\n"
                     f"**Reason**\n{loa['denial_reason']}"
@@ -2530,7 +2530,7 @@ async def _send_loa_dm(user: discord.abc.User, guild: discord.Guild, loa: dict, 
             )
         else:
             embed = discord.Embed(
-                title="Leave of Absence Ended",
+                title="📅 Leave of Absence Ended",
                 description="Your leave of absence has ended.",
                 color=discord.Color.blue(),
             )
@@ -2627,7 +2627,7 @@ class DenyLOAModal(discord.ui.Modal, title="Deny Leave of Absence"):
         await _edit_loa_request_message(interaction.guild, loa, requester)
 
         confirm = discord.Embed(
-            title="Leave of Absence Denied",
+            title="❌ Leave of Absence Denied",
             description=(
                 "Successfully denied this leave of absence request.\n"
                 f"**Reason:** {loa['denial_reason']}"
@@ -2736,7 +2736,7 @@ class CreateLOAModal(discord.ui.Modal, title="Create Leave of Absence"):
         await _send_loa_dm(interaction.user, interaction.guild, loa, "pending")
 
         confirm = discord.Embed(
-            title="Leave of Absence Pending",
+            title="⏳ Leave of Absence Pending",
             description=(
                 "Your leave of absence has been submitted to management for approval.\n"
                 f"If approved, it will end at approximately <t:{loa['end_at']}:F> (<t:{loa['end_at']}:R>)."
@@ -2763,7 +2763,7 @@ class LOAManageView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Start", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Start", emoji="▶️", style=discord.ButtonStyle.success)
     async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(CreateLOAModal())
 
@@ -2773,7 +2773,7 @@ class LOAManageView(discord.ui.View):
             embed=_loa_history_embed(interaction.user), ephemeral=True
         )
 
-    @discord.ui.button(label="End Early", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="End Early", emoji="⏹️", style=discord.ButtonStyle.danger)
     async def end_early(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         current = get_current_loa(interaction.guild.id, interaction.user.id)
@@ -3188,3 +3188,4 @@ bot.tree.add_command(summit_setup)
 if __name__ == "__main__":
     log.info("Starting Summit...")
     bot.run(TOKEN)
+
