@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 import discord
-from summit_helpdesk import serialize_message, TicketStore, SummitHelpdesk, IntakeModal, TOPICS, staff, can_open, transcript_html
+from summit_helpdesk import serialize_message, TicketStore, SummitHelpdesk, IntakeModal, TOPICS, staff, can_open, transcript_html, opening_embed
 
 OWNER = '123456789012345678'
 USER = '123456789012345679'
@@ -39,6 +39,22 @@ class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(can_open(self.member,'ia',config))
         self.member.roles=[SimpleNamespace(id=int(TEAM))]
         self.assertTrue(can_open(self.member,'ia',config))
+
+    async def test_custom_ticket_types_and_invalid_fallback(self):
+        modal = IntakeModal(self.service, 'support', ['Technical assistance', 'Partnership inquiry'])
+        self.assertEqual([o.label for o in modal.choice.options], ['Technical assistance', 'Partnership inquiry'])
+        self.assertEqual(IntakeModal(self.service, 'support', []).topics, TOPICS)
+        self.assertEqual(IntakeModal(self.service, 'support', ['x'] * 26).topics, TOPICS)
+
+    async def test_configured_opening_embed_and_limits(self):
+        embed = opening_embed({'embed': {'title': '📩 Contact WCSO', 'description': '**Welcome**', 'color': '#abcdef', 'footer': 'Summit'}}, 'support')
+        self.assertEqual(embed.title, '📩 Contact WCSO')
+        self.assertEqual(embed.description, '**Welcome**')
+        self.assertEqual(embed.colour.value, 0xabcdef)
+        self.assertEqual(embed.footer.text, 'Summit')
+        self.assertTrue(opening_embed({}, 'ia').title.startswith('🛡'))
+        with self.assertRaises(ValueError):
+            opening_embed({'embed': {'title': 'x' * 257}}, 'support')
 
     async def test_opener_cannot_claim_staff_ticket(self):
         with self.assertRaises(PermissionError):

@@ -144,12 +144,27 @@ class TicketStore:
                 self.advance('support' if match[1]=='ticket' else 'ia',int(match[2])+1)
 
 
+def opening_embed(panel, kind):
+    options = panel.get('embed') or {}
+    title = options.get('title', '📩 Open a ticket!' if kind == 'support' else '🛡️ Open an IA investigation')
+    description = options.get('description', 'Click the button, choose the reason in the pop-up, and submit to open a private ticket.' if kind == 'support' else 'Authorized personnel can open a private Internal Affairs investigation.')
+    footer = options.get('footer', 'Summit · Whatcom County Sheriff’s Office Roleplay')
+    color = options.get('color', '#143e31')
+    if not isinstance(title, str) or not 1 <= len(title) <= 256 or not isinstance(description, str) or not 1 <= len(description) <= 4000 or not isinstance(footer, str) or len(footer) > 1024 or not isinstance(color, str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', color):
+        raise ValueError('Opening embed settings are invalid. Save the panel settings again in the portal.')
+    embed = discord.Embed(title=title, description=description, colour=int(color[1:], 16))
+    if footer:
+        embed.set_footer(text=footer)
+    return embed
+
+
 class IntakeModal(discord.ui.Modal):
-    def __init__(self, service, kind):
+    def __init__(self, service, kind, topics=None):
         super().__init__(title='Open a ticket' if kind == 'support' else 'Open IA investigation', timeout=300)
         self.service, self.kind = service, kind
+        self.topics = topics if isinstance(topics, list) and 1 <= len(topics) <= 25 and all(isinstance(t, str) and 0 < len(t) <= 100 for t in topics) else TOPICS
         if kind == 'support':
-            self.choice = discord.ui.Select(options=[discord.SelectOption(label=s, value=str(i)) for i, s in enumerate(TOPICS)], min_values=1, max_values=1)
+            self.choice = discord.ui.Select(options=[discord.SelectOption(label=s, value=str(i)) for i, s in enumerate(self.topics)], min_values=1, max_values=1)
             self.add_item(discord.ui.Label(text='What do you need help with?', component=self.choice))
         else:
             self.subject = discord.ui.TextInput(max_length=100, required=True)
@@ -158,7 +173,7 @@ class IntakeModal(discord.ui.Modal):
     async def on_submit(self, interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            topic = TOPICS[int(self.choice.values[0])] if self.kind == 'support' else str(self.subject.value)
+            topic = self.topics[int(self.choice.values[0])] if self.kind == 'support' else str(self.subject.value)
             record = await self.service.open(interaction, self.kind, topic)
             await interaction.followup.send(f"Your {'IA investigation' if self.kind == 'ia' else 'ticket'} is ready: <#{record['channelId']}>", ephemeral=True)
         except (ValueError, PermissionError) as exc:
@@ -183,7 +198,7 @@ class OpeningPanel(discord.ui.View):
                 raise ValueError('This ticket panel is currently paused.')
             if not can_open(member, self.kind, config):
                 raise PermissionError('An authorized IA opening role is required.')
-            await interaction.response.send_modal(IntakeModal(self.service, self.kind))
+            await interaction.response.send_modal(IntakeModal(self.service, self.kind, config[self.kind].get('topics')))
         except (ValueError, PermissionError) as exc:
             await interaction.response.send_message(str(exc), ephemeral=True)
         except Exception:
@@ -537,8 +552,7 @@ class SummitHelpdesk:
             if kind=='support' and panel['transcriptChannelId'] and not isinstance(guild.get_channel(int(panel['transcriptChannelId'])),discord.TextChannel):raise ValueError('Configure the support transcript notice channel.')
             channel=guild.get_channel(int(panel['panelChannelId']))
             if not isinstance(channel,discord.TextChannel):raise ValueError('Opening panel channel is unavailable.')
-            embed=discord.Embed(title='Open a ticket!' if kind=='support' else 'Open an IA investigation',description='Click the button, choose the reason in the pop-up, and submit to open a private ticket.' if kind=='support' else 'Authorized personnel can open a private Internal Affairs investigation.',colour=0x143E31)
-            embed.set_footer(text='Summit · Whatcom County Sheriff’s Office Roleplay')
+            embed=opening_embed(panel, kind)
             with self.store.connect() as db:old=db.execute('SELECT channel_id,message_id FROM panels WHERE kind=?',(kind,)).fetchone()
             message=None
             if old and old[0]==str(channel.id):
