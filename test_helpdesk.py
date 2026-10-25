@@ -13,6 +13,28 @@ TEAM = '123456789012345680'
 
 
 class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ia_has_no_ping_or_claim_while_support_keeps_both(self):
+        ia={**self.record,'kind':'ia','number':5}
+        self.assertEqual([b.label for b in TicketActions(self.service,'ia-test',kind='ia').children],['Close','Close With Reason'])
+        self.assertIn('Claim',[b.label for b in TicketActions(self.service,'support-test').children])
+        notice=self.service.intake_notice(ia)
+        self.assertIsNone(notice['content'])
+        self.assertEqual(notice['allowed_mentions'].to_dict()['parse'],[])
+        support=self.service.intake_notice(self.record)
+        self.assertIn(TEAM,support['content'])
+        self.assertNotIn('Claimed',str(self.service.intake_embeds(ia)[1].to_dict()))
+        self.assertFalse(any('Claimed By' in field.name for field in self.service.log_embed(ia,True).fields))
+
+    async def test_existing_ia_controls_remove_ping_and_claim(self):
+        record={**self.record,'kind':'ia','number':5,'controlMessageId':'77'}
+        message=SimpleNamespace(edit=AsyncMock())
+        self.bot.get_channel.return_value=SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+        await self.service.update_controls(record)
+        args=message.edit.await_args.kwargs
+        self.assertIsNone(args['content'])
+        self.assertNotIn('Claim',[b.label for b in args['view'].children])
+        self.assertEqual(record['controlVersion'],3)
+
     async def test_ia_opens_directly_without_a_name_modal(self):
         self.service.open=AsyncMock(return_value={'channelId':'987'})
         interaction=SimpleNamespace(response=SimpleNamespace(defer=AsyncMock(),send_modal=AsyncMock()),followup=SimpleNamespace(send=AsyncMock()))
