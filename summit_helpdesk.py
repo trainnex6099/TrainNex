@@ -237,9 +237,11 @@ class ReasonModal(discord.ui.Modal):
 
 
 class TicketActions(discord.ui.View):
-    def __init__(self, service, ticket_id, closed=False):
+    def __init__(self, service, ticket_id, closed=False, kind='support'):
         super().__init__(timeout=None)
         for action, label, emoji, style in ([('reopen', 'Reopen ticket', '🔓', discord.ButtonStyle.secondary)] if closed else [('close-now', 'Close', '🔒', discord.ButtonStyle.danger), ('close', 'Close With Reason', '🔒', discord.ButtonStyle.danger), ('claim', 'Claim', '🙋', discord.ButtonStyle.primary)]):
+            if kind == 'ia' and action == 'claim':
+                continue
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f'summit:{action}:{ticket_id}')
             async def callback(interaction, selected=action):
                 if selected == 'close':
@@ -295,7 +297,7 @@ class SummitHelpdesk:
         for kind in ('support', 'ia'):
             self.bot.add_view(OpeningPanel(self, kind))
         for record in self.store.all():
-            self.bot.add_view(TicketActions(self, record['id'], record['status'] == 'closed'))
+            self.bot.add_view(TicketActions(self, record['id'], record['status'] == 'closed', record['kind']))
             if record.get('logMessageId'):
                 self.bot.add_view(TranscriptActions(self, record['id']), message_id=int(record['logMessageId']))
 
@@ -342,7 +344,7 @@ class SummitHelpdesk:
         for candidate in self.store.all():
             async with self.lock(candidate['id']):
                 record = self.store.get(candidate['id'])
-                refresh_controls = record['status'] in ('open','claimed') and record.get('controlVersion') != 2
+                refresh_controls = record['status'] in ('open','claimed') and record.get('controlVersion') != (3 if record['kind']=='ia' else 2)
                 if not refresh_controls and not record.get('pendingBackup') and not (record['status'] == 'closed' and not record.get('channelDeleted')):
                     continue
                 if config is None:
@@ -407,19 +409,23 @@ class SummitHelpdesk:
                 channel = await guild.create_text_channel(ticket_channel_name(record),category=category,overwrites=overwrites,topic=f"summit-ticket:{record['id']}",reason='Summit ticket requested by member')
             record.update(channelId=str(channel.id),categoryId=str(category.id),status='open')
             self.store.save(record)
-            mentions = ' '.join(f'<@&{role}>' for role in record['staffRoleIds'])
-            message = await channel.send(content=mentions or None,embeds=self.intake_embeds(record),view=TicketActions(self,record['id']),allowed_mentions=discord.AllowedMentions(everyone=False,users=False,roles=[discord.Object(id=int(role)) for role in record['staffRoleIds']]))
+            message = await channel.send(**self.intake_notice(record),embeds=self.intake_embeds(record),view=TicketActions(self,record['id'],kind=record['kind']))
             record['controlMessageId'] = str(message.id)
-            record['controlVersion'] = 2
+            record['controlVersion'] = 3 if kind=='ia' else 2
             self.store.save(record)
             await self.publish_record(record)
             return record
+
+    def intake_notice(self, record):
+        if record['kind']=='ia':
+            return {'content':None,'allowed_mentions':discord.AllowedMentions.none()}
+        return {'content':' '.join(f'<@&{role}>' for role in record['staffRoleIds']) or None,'allowed_mentions':discord.AllowedMentions(everyone=False,users=False,roles=[discord.Object(id=int(role)) for role in record['staffRoleIds']])}
 
     def intake_embeds(self, record):
         greeting=discord.Embed(description='Thank you for contacting support.\nPlease describe your issue and wait for a response.' if record['kind']=='support' else 'Internal Affairs intake is ready.\nPlease provide the details of this investigation below.',colour=0x143E31)
         greeting.set_footer(text='Summit · Whatcom County Sheriff’s Office Roleplay')
         topic=discord.Embed(title='Support' if record['kind']=='support' else 'Internal Affairs',description=record['topic'],colour=0x143E31)
-        topic.set_footer(text=f"Ticket #{record['number']} · " + (f"Claimed by {record['claimedByName']}" if record.get('claimedByName') else 'Awaiting staff'))
+        topic.set_footer(text=f"{ticket_channel_name(record)} · Internal Affairs" if record['kind']=='ia' else f"Ticket #{record['number']} · " + (f"Claimed by {record['claimedByName']}" if record.get('claimedByName') else 'Awaiting staff'))
         return [greeting,topic]
 
     def log_embed(self, record, closed, public=False):
@@ -430,7 +436,10 @@ class SummitHelpdesk:
             embed.set_footer(text='Summit · WCSO Roleplay Support')
             return embed
         fields=[('🌐 Ticket ID',str(record['number'])),('👤 Opened By',f"<@{record['openerId']}>"),('🔒 Closed By',f"<@{record['closedBy']}>" if record.get('closedBy') else record.get('closedByName','Unknown')),('🕒 Open Time',record['openedAt']),('🙋 Claimed By',f"<@{record['claimedBy']}>" if record.get('claimedBy') else 'Unclaimed'),('📝 Reason',record.get('closeReason') or 'No reason specified')]
-        for name,value in fields:embed.add_field(name=name,value=value[:1024],inline=not name.endswith('Reason'))
+        for name,value in fields:
+            if record['kind']=='ia' and name.endswith('Claimed By'):
+                continue
+            embed.add_field(name=name,value=value[:1024],inline=not name.endswith('Reason'))
         embed.set_footer(text=f"Summit · {'Internal Affairs' if record['kind']=='ia' else record['topic']}")
         return embed
 
@@ -464,6 +473,7 @@ class SummitHelpdesk:
             if not record or not staff(member,record,config['ownerId']):
                 raise PermissionError('An authorized handling staff role is required.')
             if action=='claim':
+                if record['kind']=='ia':raise ValueError('IA investigations do not use ticket claims.')
                 if record['status']=='closed':raise ValueError('This ticket is closed.')
                 if record.get('claimedBy') and record['claimedBy']!=str(member.id):raise ValueError('Another staff member has already claimed this ticket.')
                 record.update(claimedBy=str(member.id),claimedByName=member.display_name,status='claimed')
@@ -481,7 +491,7 @@ class SummitHelpdesk:
                         role=guild.get_role(int(role_id))
                         if role and role!=guild.default_role:overwrites[role]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,attach_files=True)
                     channel=await guild.create_text_channel(ticket_channel_name(record),category=category,overwrites=overwrites,topic=f"summit-ticket:{record['id']}",reason='Summit case reopened by staff')
-                    controls=await channel.send('Previous closed conversation is retained and will be included when this ticket closes again.',view=TicketActions(self,record['id']),allowed_mentions=discord.AllowedMentions.none())
+                    controls=await channel.send('Previous closed conversation is retained and will be included when this ticket closes again.',view=TicketActions(self,record['id'],kind=record['kind']),allowed_mentions=discord.AllowedMentions.none())
                     record.update(channelId=str(channel.id),controlMessageId=str(controls.id))
                 await self.permissions(channel,record,True)
                 record.setdefault('closures',[]).append({key:record.get(key) for key in ('closedAt','closedBy','closedByName','closeReason','logMessageId','archiveUrl')})
@@ -503,8 +513,10 @@ class SummitHelpdesk:
         if channel and record.get('controlMessageId'):
             try:
                 message=await channel.fetch_message(int(record['controlMessageId']))
-                await message.edit(embeds=self.intake_embeds(record),view=TicketActions(self,record['id'],record['status']=='closed'))
-                record['controlVersion'] = 2
+                kwargs={'embeds':self.intake_embeds(record),'view':TicketActions(self,record['id'],record['status']=='closed',record['kind']),'allowed_mentions':discord.AllowedMentions.none()}
+                if record['kind']=='ia':kwargs['content']=None
+                await message.edit(**kwargs)
+                record['controlVersion'] = 3 if record['kind']=='ia' else 2
                 self.store.save(record)
             except discord.NotFound:
                 pass
