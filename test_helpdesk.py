@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 import discord
-from summit_helpdesk import serialize_message, TicketStore, SummitHelpdesk, IntakeModal, TOPICS, staff, can_open, transcript_html, opening_embed, TicketActions
+from summit_helpdesk import serialize_message, TicketStore, SummitHelpdesk, IntakeModal, TOPICS, staff, can_open, transcript_html, opening_embed, TicketActions, OpeningPanel, ticket_channel_name
 
 OWNER = '123456789012345678'
 USER = '123456789012345679'
@@ -13,6 +13,23 @@ TEAM = '123456789012345680'
 
 
 class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ia_opens_directly_without_a_name_modal(self):
+        self.service.open=AsyncMock(return_value={'channelId':'987'})
+        interaction=SimpleNamespace(response=SimpleNamespace(defer=AsyncMock(),send_modal=AsyncMock()),followup=SimpleNamespace(send=AsyncMock()))
+        await OpeningPanel(self.service,'ia').open(interaction)
+        interaction.response.defer.assert_awaited_once()
+        interaction.response.send_modal.assert_not_awaited()
+        self.service.open.assert_awaited_once_with(interaction,'ia','Internal Affairs investigation')
+
+    async def test_ia_uses_case_number_as_topic_and_channel_name(self):
+        record=self.service.store.create({**self.record,'id':'numbered-case','kind':'ia','topic':'Custom title must not be used'})
+        self.assertEqual(record['number'],5)
+        self.assertEqual(record['topic'],'case-005')
+        self.assertEqual(ticket_channel_name(record),'case-005')
+        self.service.store.observe_channels([SimpleNamespace(name='case-007')])
+        later=self.service.store.create({**self.record,'id':'later-case','kind':'ia'})
+        self.assertEqual(ticket_channel_name(later),'case-008')
+
     async def test_open_and_claimed_tickets_never_post_transcript_notices(self):
         channel=MagicMock(spec=discord.TextChannel)
         channel.send=AsyncMock()

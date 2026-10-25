@@ -109,6 +109,8 @@ class TicketStore:
             if existing:
                 return json.loads(existing[0])
             record['number'] = db.execute('SELECT next_number FROM counters WHERE kind=?', (record['kind'],)).fetchone()[0]
+            if record['kind']=='ia':
+                record['topic']=ticket_channel_name(record)
             record['pendingBackup'] = True
             db.execute('UPDATE counters SET next_number=next_number+1 WHERE kind=?', (record['kind'],))
             db.execute('INSERT INTO tickets (id,number,record) VALUES (?,?,?)', (record['id'],record['number'],json.dumps(record)))
@@ -158,6 +160,10 @@ def opening_embed(panel, kind):
     return embed
 
 
+def ticket_channel_name(record):
+    return f"case-{record['number']:03d}" if record['kind']=='ia' else f"ticket-{record['number']}"
+
+
 class IntakeModal(discord.ui.Modal):
     def __init__(self, service, kind, topics=None):
         super().__init__(title='Open a ticket' if kind == 'support' else 'Open IA investigation', timeout=300)
@@ -166,14 +172,11 @@ class IntakeModal(discord.ui.Modal):
         if kind == 'support':
             self.choice = discord.ui.Select(options=[discord.SelectOption(label=s, value=str(i)) for i, s in enumerate(self.topics)], min_values=1, max_values=1)
             self.add_item(discord.ui.Label(text='What do you need help with?', component=self.choice))
-        else:
-            self.subject = discord.ui.TextInput(max_length=100, required=True)
-            self.add_item(discord.ui.Label(text='Investigation title', component=self.subject))
 
     async def on_submit(self, interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            topic = self.topics[int(self.choice.values[0])] if self.kind == 'support' else str(self.subject.value)
+            topic = self.topics[int(self.choice.values[0])] if self.kind == 'support' else 'Internal Affairs investigation'
             record = await self.service.open(interaction, self.kind, topic)
             await interaction.followup.send(f"Your {'IA investigation' if self.kind == 'ia' else 'ticket'} is ready: <#{record['channelId']}>", ephemeral=True)
         except (ValueError, PermissionError) as exc:
@@ -191,6 +194,16 @@ class OpeningPanel(discord.ui.View):
         self.add_item(button)
 
     async def open(self, interaction):
+        if self.kind == 'ia':
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            try:
+                record=await self.service.open(interaction,'ia','Internal Affairs investigation')
+                await interaction.followup.send(f"Your IA investigation is ready: <#{record['channelId']}>",ephemeral=True)
+            except (ValueError,PermissionError) as exc:
+                await interaction.followup.send(str(exc),ephemeral=True)
+            except Exception:
+                await interaction.followup.send('Summit could not finish opening this case. Check for an existing case before trying again, or contact the portal owner.',ephemeral=True)
+            return
         try:
             config = await self.service.config()
             member = await self.service.member(interaction)
@@ -391,7 +404,7 @@ class SummitHelpdesk:
                 overwrites[owner] = discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)
             channel = next((ch for ch in guild.text_channels if ch.topic == f"summit-ticket:{record['id']}"), None)
             if channel is None:
-                channel = await guild.create_text_channel(f"{'case' if kind=='ia' else 'ticket'}-{record['number']}",category=category,overwrites=overwrites,topic=f"summit-ticket:{record['id']}",reason='Summit ticket requested by member')
+                channel = await guild.create_text_channel(ticket_channel_name(record),category=category,overwrites=overwrites,topic=f"summit-ticket:{record['id']}",reason='Summit ticket requested by member')
             record.update(channelId=str(channel.id),categoryId=str(category.id),status='open')
             self.store.save(record)
             mentions = ' '.join(f'<@&{role}>' for role in record['staffRoleIds'])
@@ -467,7 +480,7 @@ class SummitHelpdesk:
                     for role_id in record['staffRoleIds']:
                         role=guild.get_role(int(role_id))
                         if role and role!=guild.default_role:overwrites[role]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,attach_files=True)
-                    channel=await guild.create_text_channel(f"{'case' if record['kind']=='ia' else 'ticket'}-{record['number']}",category=category,overwrites=overwrites,topic=f"summit-ticket:{record['id']}",reason='Summit case reopened by staff')
+                    channel=await guild.create_text_channel(ticket_channel_name(record),category=category,overwrites=overwrites,topic=f"summit-ticket:{record['id']}",reason='Summit case reopened by staff')
                     controls=await channel.send('Previous closed conversation is retained and will be included when this ticket closes again.',view=TicketActions(self,record['id']),allowed_mentions=discord.AllowedMentions.none())
                     record.update(channelId=str(channel.id),controlMessageId=str(controls.id))
                 await self.permissions(channel,record,True)
