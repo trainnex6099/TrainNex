@@ -57,7 +57,7 @@ class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ia_has_no_ping_or_claim_while_support_keeps_both(self):
         ia={**self.record,'kind':'ia','number':5}
-        self.assertEqual([b.label for b in TicketActions(self.service,'ia-test',kind='ia').children],['Close','Close With Reason'])
+        self.assertEqual([b.label for b in TicketActions(self.service,'ia-test',kind='ia').children],['Close','Close With Reason','Case File / Final Report'])
         self.assertIn('Claim',[b.label for b in TicketActions(self.service,'support-test').children])
         notice=self.service.intake_notice(ia)
         self.assertIsNone(notice['content'])
@@ -75,7 +75,7 @@ class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
         args=message.edit.await_args.kwargs
         self.assertIsNone(args['content'])
         self.assertNotIn('Claim',[b.label for b in args['view'].children])
-        self.assertEqual(record['controlVersion'],3)
+        self.assertEqual(record['controlVersion'],5)
 
     async def test_ia_opens_directly_without_a_name_modal(self):
         self.service.open=AsyncMock(return_value={'channelId':'987'})
