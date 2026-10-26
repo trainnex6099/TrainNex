@@ -12,6 +12,7 @@ import os
 import re
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 import discord
 
 GUILD_ID = 1516305981078900756
@@ -237,9 +238,12 @@ class ReasonModal(discord.ui.Modal):
 
 
 class TicketActions(discord.ui.View):
-    def __init__(self, service, ticket_id, closed=False, kind='support'):
+    def __init__(self, service, ticket_id, closed=False, kind='support', claimed=False):
         super().__init__(timeout=None)
-        for action, label, emoji, style in ([('reopen', 'Reopen ticket', '🔓', discord.ButtonStyle.secondary)] if closed else [('close-now', 'Close', '🔒', discord.ButtonStyle.danger), ('close', 'Close With Reason', '🔒', discord.ButtonStyle.danger), ('claim', 'Claim', '🙋', discord.ButtonStyle.primary)]):
+        actions = [('reopen', 'Reopen ticket', '🔓', discord.ButtonStyle.secondary)] if closed else [('close-now', 'Close', '🔒', discord.ButtonStyle.danger), ('close', 'Close With Reason', '🔒', discord.ButtonStyle.danger)]
+        if not closed and kind == 'support':
+            actions.append(('open-ia', 'Open IA Case', '🛡️', discord.ButtonStyle.secondary) if claimed else ('claim', 'Claim', '🙋', discord.ButtonStyle.primary))
+        for action, label, emoji, style in actions:
             if kind == 'ia' and action == 'claim':
                 continue
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f'summit:{action}:{ticket_id}')
@@ -249,6 +253,10 @@ class TicketActions(discord.ui.View):
                     return
                 await interaction.response.defer(ephemeral=True, thinking=True)
                 try:
+                    if selected == 'open-ia':
+                        case = await service.open_ia_from_ticket(interaction, ticket_id)
+                        await interaction.followup.send(f"IA case: <#{case['channelId']}>", ephemeral=True)
+                        return
                     if selected == 'close-now':
                         await service.close(interaction, ticket_id, '')
                         await interaction.followup.send('Ticket closed and transcript saved.', ephemeral=True)
@@ -297,7 +305,7 @@ class SummitHelpdesk:
         for kind in ('support', 'ia'):
             self.bot.add_view(OpeningPanel(self, kind))
         for record in self.store.all():
-            self.bot.add_view(TicketActions(self, record['id'], record['status'] == 'closed', record['kind']))
+            self.bot.add_view(TicketActions(self, record['id'], record['status'] == 'closed', record['kind'], record['status'] == 'claimed'))
             if record.get('logMessageId'):
                 self.bot.add_view(TranscriptActions(self, record['id']), message_id=int(record['logMessageId']))
 
@@ -344,7 +352,7 @@ class SummitHelpdesk:
         for candidate in self.store.all():
             async with self.lock(candidate['id']):
                 record = self.store.get(candidate['id'])
-                refresh_controls = record['status'] in ('open','claimed') and record.get('controlVersion') != (3 if record['kind']=='ia' else 2)
+                refresh_controls = record['status'] in ('open','claimed') and record.get('controlVersion') != (3 if record['kind']=='ia' else 4)
                 if not refresh_controls and not record.get('pendingBackup') and not (record['status'] == 'closed' and not record.get('channelDeleted')):
                     continue
                 if config is None:
@@ -374,7 +382,24 @@ class SummitHelpdesk:
                 raise ValueError('This inbox grants access to a member outside its authorized team.')
         return channel
 
-    async def open(self, interaction, kind, topic):
+    async def open_ia_from_ticket(self, interaction, ticket_id):
+        async with self.lock(ticket_id):
+            source = self.store.get(ticket_id)
+            member = await self.member(interaction)
+            config = await self.config()
+            if not source or not staff(member, source, config['ownerId']) or not can_open(member, 'ia', config):
+                raise PermissionError('An authorized ticket handling role and IA opening role are required.')
+            if source['kind'] != 'support' or source['status'] != 'claimed' or not source.get('claimedBy'):
+                raise ValueError('Claim this support ticket before opening an IA case.')
+            # A stable ID and the existing open lock prevent duplicate cases on retries.
+            request = SimpleNamespace(id=f"ia-from-{source['id']}", guild=interaction.guild, user=interaction.user)
+            case = await self.open(request, 'ia', 'Internal Affairs investigation', source_ticket=source)
+            source.update(linkedIaCaseId=case['id'], linkedIaChannelId=case['channelId'])
+            self.store.save(source)
+            await self.publish_record(source)
+            return case
+
+    async def open(self, interaction, kind, topic, source_ticket=None):
         await self.restore()
         member = await self.member(interaction)
         config = await self.config()
@@ -396,6 +421,8 @@ class SummitHelpdesk:
             if kind == 'ia' and panel.get('transcriptChannelId'):
                 self.private_destination(guild, panel['transcriptChannelId'], panel['staffRoleIds'], config['ownerId'])
             record = existing or self.store.create({'id':str(interaction.id), 'guildId':str(GUILD_ID), 'kind':kind, 'topic':topic[:100], 'openerId':str(member.id), 'openerName':member.display_name, 'staffRoleIds':panel['staffRoleIds'], 'transcriptChannelId':panel['transcriptChannelId'], 'status':'opening', 'openedAt':now(), 'messages':[]})
+            if source_ticket:
+                record.update(sourceTicketId=source_ticket['id'], sourceTicketNumber=source_ticket['number'], sourceChannelId=source_ticket['channelId'], sourceTopic=source_ticket['topic'], sourceOpenerId=source_ticket['openerId'])
             overwrites = {guild.default_role:discord.PermissionOverwrite(view_channel=False), guild.me:discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True), member:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,attach_files=True)}
             for role_id in panel['staffRoleIds']:
                 role = guild.get_role(int(role_id))
@@ -411,7 +438,7 @@ class SummitHelpdesk:
             self.store.save(record)
             message = await channel.send(**self.intake_notice(record),embeds=self.intake_embeds(record),view=TicketActions(self,record['id'],kind=record['kind']))
             record['controlMessageId'] = str(message.id)
-            record['controlVersion'] = 3 if kind=='ia' else 2
+            record['controlVersion'] = 3 if kind=='ia' else 4
             self.store.save(record)
             await self.publish_record(record)
             return record
@@ -426,6 +453,10 @@ class SummitHelpdesk:
         greeting.set_footer(text='Summit · Whatcom County Sheriff’s Office Roleplay')
         topic=discord.Embed(title='Support' if record['kind']=='support' else 'Internal Affairs',description=record['topic'],colour=0x143E31)
         topic.set_footer(text=f"{ticket_channel_name(record)} · Internal Affairs" if record['kind']=='ia' else f"Ticket #{record['number']} · " + (f"Claimed by {record['claimedByName']}" if record.get('claimedByName') else 'Awaiting staff'))
+        if record['kind']=='ia' and record.get('sourceTicketId'):
+            topic.add_field(name='Source ticket', value=f"[Ticket #{record['sourceTicketNumber']}](https://discord.com/channels/{record['guildId']}/{record['sourceChannelId']})", inline=False)
+            topic.add_field(name='Ticket topic', value=record['sourceTopic'][:1024], inline=False)
+            topic.add_field(name='Ticket opened by', value=f"<@{record['sourceOpenerId']}>", inline=False)
         return [greeting,topic]
 
     def log_embed(self, record, closed, public=False):
@@ -513,10 +544,10 @@ class SummitHelpdesk:
         if channel and record.get('controlMessageId'):
             try:
                 message=await channel.fetch_message(int(record['controlMessageId']))
-                kwargs={'embeds':self.intake_embeds(record),'view':TicketActions(self,record['id'],record['status']=='closed',record['kind']),'allowed_mentions':discord.AllowedMentions.none()}
+                kwargs={'embeds':self.intake_embeds(record),'view':TicketActions(self,record['id'],record['status']=='closed',record['kind'],record['status']=='claimed'),'allowed_mentions':discord.AllowedMentions.none()}
                 if record['kind']=='ia':kwargs['content']=None
                 await message.edit(**kwargs)
-                record['controlVersion'] = 3 if record['kind']=='ia' else 2
+                record['controlVersion'] = 3 if record['kind']=='ia' else 4
                 self.store.save(record)
             except discord.NotFound:
                 pass

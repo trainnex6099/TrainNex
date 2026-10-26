@@ -13,6 +13,48 @@ TEAM = '123456789012345680'
 
 
 class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ia_escalation_button_only_on_claimed_support(self):
+        for closed,kind,claimed in [(False,'support',False),(True,'support',True),(False,'ia',True)]:
+            self.assertNotIn('Open IA Case',[b.label for b in TicketActions(self.service,'case-1',closed,kind,claimed).children])
+        view=TicketActions(self.service,'case-1',claimed=True)
+        self.assertEqual([b.label for b in view.children],['Close','Close With Reason','Open IA Case'])
+        self.service.open_ia_from_ticket=AsyncMock(return_value={'channelId':'999'})
+        interaction=SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()),followup=SimpleNamespace(send=AsyncMock()))
+        await view.children[2].callback(interaction)
+        self.service.open_ia_from_ticket.assert_awaited_once_with(interaction,'case-1')
+
+    async def test_escalation_rechecks_claim_and_both_permissions(self):
+        self.service.config=AsyncMock(return_value={'ownerId':OWNER,'ia':{'openerRoleIds':[TEAM]}})
+        self.service.open=AsyncMock(return_value={'id':'linked','channelId':'999'})
+        with self.assertRaises(PermissionError):
+            await self.service.open_ia_from_ticket(self.interaction,'case-1')
+        self.member.roles=[SimpleNamespace(id=int(TEAM))]
+        with self.assertRaises(ValueError):
+            await self.service.open_ia_from_ticket(self.interaction,'case-1')
+        self.record.update(status='claimed',claimedBy=USER)
+        self.service.store.save(self.record)
+        self.service.config.return_value['ia']['openerRoleIds']=['987654321012345678']
+        with self.assertRaises(PermissionError):
+            await self.service.open_ia_from_ticket(self.interaction,'case-1')
+        self.service.open.assert_not_awaited()
+
+    async def test_escalation_uses_stable_case_id_and_links_source_without_transcript(self):
+        self.service.config=AsyncMock(return_value={'ownerId':OWNER,'ia':{'openerRoleIds':[TEAM]}})
+        self.member.roles=[SimpleNamespace(id=int(TEAM))]
+        self.record.update(status='claimed',claimedBy=USER)
+        self.service.store.save(self.record)
+        self.service.open=AsyncMock(return_value={'id':'ia-from-case-1','channelId':'999'})
+        await self.service.open_ia_from_ticket(self.interaction,'case-1')
+        await self.service.open_ia_from_ticket(self.interaction,'case-1')
+        for call in self.service.open.await_args_list:
+            self.assertEqual(call.args[0].id,'ia-from-case-1')
+            self.assertEqual(call.kwargs['source_ticket']['id'],'case-1')
+        saved=self.service.store.get('case-1')
+        self.assertEqual(saved['linkedIaCaseId'],'ia-from-case-1')
+        self.assertEqual(saved['messages'],[])
+        case={**self.record,'kind':'ia','sourceTicketId':'case-1','sourceTicketNumber':1,'sourceChannelId':'123','sourceTopic':'Other','sourceOpenerId':USER}
+        self.assertEqual(self.service.intake_embeds(case)[1].fields[0].value,'[Ticket #1](https://discord.com/channels/1516305981078900756/123)')
+
     async def test_ia_has_no_ping_or_claim_while_support_keeps_both(self):
         ia={**self.record,'kind':'ia','number':5}
         self.assertEqual([b.label for b in TicketActions(self.service,'ia-test',kind='ia').children],['Close','Close With Reason'])
