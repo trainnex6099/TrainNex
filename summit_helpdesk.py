@@ -269,6 +269,8 @@ class TicketActions(discord.ui.View):
                     await interaction.followup.send('The ticket could not be updated. Please contact the owner.', ephemeral=True)
             button.callback = callback
             self.add_item(button)
+        if kind == 'ia' and not closed:
+            self.add_item(discord.ui.Button(label='Case File / Final Report', emoji='📁', url=f"{service.api.base_url.rstrip('/')}/?section=ia&caseId={ticket_id}"))
 
 
 class TranscriptActions(discord.ui.View):
@@ -352,7 +354,7 @@ class SummitHelpdesk:
         for candidate in self.store.all():
             async with self.lock(candidate['id']):
                 record = self.store.get(candidate['id'])
-                refresh_controls = record['status'] in ('open','claimed') and record.get('controlVersion') != (3 if record['kind']=='ia' else 4)
+                refresh_controls = record['status'] in ('open','claimed') and record.get('controlVersion') != (5 if record['kind']=='ia' else 4)
                 if not refresh_controls and not record.get('pendingBackup') and not (record['status'] == 'closed' and not record.get('channelDeleted')):
                     continue
                 if config is None:
@@ -438,7 +440,7 @@ class SummitHelpdesk:
             self.store.save(record)
             message = await channel.send(**self.intake_notice(record),embeds=self.intake_embeds(record),view=TicketActions(self,record['id'],kind=record['kind']))
             record['controlMessageId'] = str(message.id)
-            record['controlVersion'] = 3 if kind=='ia' else 4
+            record['controlVersion'] = 5 if kind=='ia' else 4
             self.store.save(record)
             await self.publish_record(record)
             return record
@@ -547,7 +549,7 @@ class SummitHelpdesk:
                 kwargs={'embeds':self.intake_embeds(record),'view':TicketActions(self,record['id'],record['status']=='closed',record['kind'],record['status']=='claimed'),'allowed_mentions':discord.AllowedMentions.none()}
                 if record['kind']=='ia':kwargs['content']=None
                 await message.edit(**kwargs)
-                record['controlVersion'] = 3 if record['kind']=='ia' else 4
+                record['controlVersion'] = 5 if record['kind']=='ia' else 4
                 self.store.save(record)
             except discord.NotFound:
                 pass
