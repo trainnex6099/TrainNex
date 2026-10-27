@@ -3006,7 +3006,7 @@ async def execute_portal_reset(action, actor_id):
 
 async def execute_portal_action(action, actor_id):
     """Portal actions use the same records and role/message helpers as Discord."""
-    if action.get('action') == 'helpdesk.publish':
+    if action.get('action') in ('helpdesk.publish','helpdesk.signature-request'):
         return await HELPDESK.execute(action, actor_id)
     if action.get('action') == 'system.reset':
         return await execute_portal_reset(action, actor_id)

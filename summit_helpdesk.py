@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import time
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
@@ -350,6 +351,12 @@ class SummitHelpdesk:
 
     async def synchronize(self):
         await self.restore()
+        if not hasattr(self,'_investigators_synced') or time.monotonic()-self._investigators_synced>300:
+            guild=self.bot.get_guild(GUILD_ID)
+            if guild:
+                investigators=[{'id':str(m.id),'name':m.display_name} for m in guild.members if not m.bot and any(str(role.id)=='1516461975239004340' for role in m.roles)]
+                await self.api.put('/api/internal-affairs/signing',{'investigators':investigators})
+                self._investigators_synced=time.monotonic()
         config = None
         for candidate in self.store.all():
             async with self.lock(candidate['id']):
@@ -612,6 +619,27 @@ class SummitHelpdesk:
             await self.archive_channel(record)
 
     async def execute(self, action, actor_id):
+        if action['action']=='helpdesk.signature-request':
+            request_id=str(action.get('requestId',''))
+            if not re.fullmatch(r'[0-9a-f-]{36}',request_id):raise ValueError('Invalid signing request.')
+            data=await self.api.get('/api/internal-affairs/signing?requestId='+request_id)
+            record=data['request']
+            if record.get('dm_status')=='sent':return {'status':'signing request already delivered'}
+            guild=self.bot.get_guild(GUILD_ID)
+            if not guild:raise ValueError('Summit is not connected to WCSO.')
+            member=await guild.fetch_member(int(record['signer_id']))
+            if str(member.id)!=str(data.get('ownerId')) and not any(str(r.id) in ('1516461975239004340','1526692828946763886') for r in member.roles):
+                await self.api.put('/api/internal-affairs/signing',{'requestId':request_id,'status':'failed','error':'The assigned signer no longer has Internal Affairs access.'})
+                raise PermissionError('The assigned signer no longer has Internal Affairs access.')
+            embed=discord.Embed(title='🖊️ IA documents ready for your signature',description='An Internal Affairs case file and final report are ready. Open the private portal link and sign in with your own Discord account to review and sign both documents.',colour=0x143E31)
+            view=discord.ui.View();view.add_item(discord.ui.Button(label='Review & sign documents',url=self.api.base_url.rstrip('/')+data['signingPath']))
+            try:
+                message=await member.send(embed=embed,view=view,allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException:
+                await self.api.put('/api/internal-affairs/signing',{'requestId':request_id,'status':'failed','error':'Discord blocked the DM. Enable direct messages from this server; the assigned signer can also sign in the IA portal.'})
+                raise ValueError('Discord could not deliver the signing DM.')
+            await self.api.put('/api/internal-affairs/signing',{'requestId':request_id,'status':'sent','messageId':str(message.id)})
+            return {'status':'signing request delivered'}
         config=await self.config()
         guild=self.bot.get_guild(GUILD_ID)
         if not guild:raise ValueError('Summit is not connected to WCSO.')

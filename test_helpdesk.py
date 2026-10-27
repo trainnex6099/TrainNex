@@ -13,6 +13,40 @@ TEAM = '123456789012345680'
 
 
 class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
+    async def test_signing_dm_uses_assigned_account_and_private_portal_link(self):
+        request_id='12345678-1234-1234-1234-123456789abc'
+        self.member.roles=[SimpleNamespace(id=1516461975239004340)]
+        self.member.send=AsyncMock(return_value=SimpleNamespace(id=998))
+        self.bot.get_guild.return_value=SimpleNamespace(fetch_member=AsyncMock(return_value=self.member))
+        self.api.get=AsyncMock(return_value={'request':{'signer_id':USER,'dm_status':'queued'},'signingPath':'/?section=ia&caseId=case-1&signing=1','ownerId':OWNER})
+        result=await self.service.execute({'action':'helpdesk.signature-request','requestId':request_id},USER)
+        self.assertEqual(result['status'],'signing request delivered')
+        args=self.member.send.await_args.kwargs
+        self.assertEqual(args['view'].children[0].url,'https://portal.example/?section=ia&caseId=case-1&signing=1')
+        self.assertEqual(args['allowed_mentions'].to_dict()['parse'],[])
+        self.assertEqual(self.api.put.await_args.args[1]['status'],'sent')
+        self.api.get.return_value['request']['dm_status']='sent'
+        await self.service.execute({'action':'helpdesk.signature-request','requestId':request_id},USER)
+        self.member.send.assert_awaited_once()
+
+    async def test_blocked_signing_dm_records_failure(self):
+        self.member.roles=[SimpleNamespace(id=1516461975239004340)]
+        self.member.send=AsyncMock(side_effect=discord.Forbidden(SimpleNamespace(status=403,reason='Forbidden'),'DM blocked'))
+        self.bot.get_guild.return_value=SimpleNamespace(fetch_member=AsyncMock(return_value=self.member))
+        self.api.get=AsyncMock(return_value={'request':{'signer_id':USER,'dm_status':'queued'},'ownerId':OWNER,'signingPath':'/?section=ia&caseId=case-1'})
+        with self.assertRaises(ValueError):
+            await self.service.execute({'action':'helpdesk.signature-request','requestId':'12345678-1234-1234-1234-123456789abc'},USER)
+        self.assertEqual(self.api.put.await_args.args[1]['status'],'failed')
+
+    async def test_signing_request_does_not_dm_an_unqualified_member(self):
+        self.member.send=AsyncMock()
+        self.bot.get_guild.return_value=SimpleNamespace(fetch_member=AsyncMock(return_value=self.member))
+        self.api.get=AsyncMock(return_value={'request':{'signer_id':USER,'dm_status':'queued'},'ownerId':OWNER})
+        with self.assertRaises(PermissionError):
+            await self.service.execute({'action':'helpdesk.signature-request','requestId':'12345678-1234-1234-1234-123456789abc'},USER)
+        self.member.send.assert_not_awaited()
+        self.assertEqual(self.api.put.await_args.args[1]['status'],'failed')
+
     async def test_ia_escalation_button_only_on_claimed_support(self):
         for closed,kind,claimed in [(False,'support',False),(True,'support',True),(False,'ia',True)]:
             self.assertNotIn('Open IA Case',[b.label for b in TicketActions(self.service,'case-1',closed,kind,claimed).children])
