@@ -18,12 +18,14 @@ class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
         self.member.roles=[SimpleNamespace(id=1516461975239004340)]
         self.member.send=AsyncMock(return_value=SimpleNamespace(id=998))
         self.bot.get_guild.return_value=SimpleNamespace(fetch_member=AsyncMock(return_value=self.member))
-        self.api.get=AsyncMock(return_value={'request':{'signer_id':USER,'dm_status':'queued'},'signingPath':'/?section=ia&caseId=case-1&signing=1','ownerId':OWNER})
+        self.api.get=AsyncMock(return_value={'request':{'signer_id':USER,'dm_status':'queued'},'signingPath':'/?section=ia&caseId=case-1&signing=1','ownerId':OWNER,'caseLabel':'case-005'})
         result=await self.service.execute({'action':'helpdesk.signature-request','requestId':request_id},USER)
         self.assertEqual(result['status'],'signing request delivered')
         args=self.member.send.await_args.kwargs
         self.assertEqual(args['view'].children[0].url,'https://portal.example/?section=ia&caseId=case-1&signing=1')
         self.assertEqual(args['allowed_mentions'].to_dict()['parse'],[])
+        self.assertEqual(args['embed'].fields[0].name,'Case')
+        self.assertEqual(args['embed'].fields[0].value,'`case-005`')
         self.assertEqual(self.api.put.await_args.args[1]['status'],'sent')
         self.api.get.return_value['request']['dm_status']='sent'
         await self.service.execute({'action':'helpdesk.signature-request','requestId':request_id},USER)
