@@ -632,6 +632,9 @@ class SummitHelpdesk:
                 await self.api.put('/api/internal-affairs/signing',{'requestId':request_id,'status':'failed','error':'The assigned signer no longer has Internal Affairs access.'})
                 raise PermissionError('The assigned signer no longer has Internal Affairs access.')
             embed=discord.Embed(title='🖊️ IA documents ready for your signature',description='An Internal Affairs case file and final report are ready. Open the private portal link and sign in with your own Discord account to review and sign both documents.',colour=0x143E31)
+            case_label=str(data.get('caseLabel',''))
+            if re.fullmatch(r'case-\d{3,12}',case_label):
+                embed.add_field(name='Case',value=f'`{case_label}`',inline=False)
             view=discord.ui.View();view.add_item(discord.ui.Button(label='Review & sign documents',url=self.api.base_url.rstrip('/')+data['signingPath']))
             try:
                 message=await member.send(embed=embed,view=view,allowed_mentions=discord.AllowedMentions.none())
