@@ -349,6 +349,26 @@ class SummitHelpdesk:
             raise RuntimeError('Ticket backup not confirmed')
         self.store.mark_clean(record)
 
+    async def synchronize_members(self):
+        # A separate member sync must not interrupt ticket or signing processing.
+        if not hasattr(self, '_members_synced') or time.monotonic()-self._members_synced>300:
+            guild = self.bot.get_guild(GUILD_ID)
+            if guild:
+                try:
+                    if not guild.chunked:
+                        await guild.chunk(cache=True)
+                    members = sorted([{'id':str(m.id), 'username':m.name,
+                                       'displayName':m.display_name,
+                                       'avatarUrl':str(m.display_avatar.replace(size=128).url)}
+                                      for m in guild.members if not m.bot], key=lambda m:m['id'])
+                    result = await self.api.put('/api/internal-affairs/members',
+                                                {'guildId':str(GUILD_ID), 'members':members})
+                    if result.get('ok'):
+                        self._members_synced = time.monotonic()
+                except Exception:
+                    # Retry on the next interval without logging member data or credentials.
+                    self._members_synced = time.monotonic()-240
+
     async def synchronize(self):
         await self.restore()
         if not hasattr(self,'_investigators_synced') or time.monotonic()-self._investigators_synced>300:
@@ -357,6 +377,7 @@ class SummitHelpdesk:
                 investigators=[{'id':str(m.id),'name':m.display_name} for m in guild.members if not m.bot and any(str(role.id)=='1516461975239004340' for role in m.roles)]
                 await self.api.put('/api/internal-affairs/signing',{'investigators':investigators})
                 self._investigators_synced=time.monotonic()
+        await self.synchronize_members()
         config = None
         for candidate in self.store.all():
             async with self.lock(candidate['id']):

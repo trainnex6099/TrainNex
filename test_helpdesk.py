@@ -13,6 +13,28 @@ TEAM = '123456789012345680'
 
 
 class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
+    async def test_member_directory_chunks_complete_members_and_excludes_bots(self):
+        avatar=SimpleNamespace(replace=lambda **kwargs: SimpleNamespace(url='https://cdn.discordapp.com/embed/avatars/0.png'))
+        guild=SimpleNamespace(chunked=False,chunk=AsyncMock(),members=[
+            SimpleNamespace(id=int(USER),name='actual.user',display_name='Employee Name',display_avatar=avatar,bot=False),
+            SimpleNamespace(id=998,name='bot',display_name='Bot',display_avatar=avatar,bot=True)])
+        self.bot.get_guild.return_value=guild
+        self.api.put=AsyncMock(return_value={'ok':True})
+        await self.service.synchronize_members()
+        guild.chunk.assert_awaited_once_with(cache=True)
+        path,body=self.api.put.await_args.args
+        self.assertEqual(path,'/api/internal-affairs/members')
+        self.assertEqual(body['guildId'],'1516305981078900756')
+        self.assertEqual(body['members'],[{'id':USER,'username':'actual.user','displayName':'Employee Name','avatarUrl':'https://cdn.discordapp.com/embed/avatars/0.png'}])
+        await self.service.synchronize_members()
+        self.assertEqual(self.api.put.await_count,1)
+
+    async def test_member_directory_failure_does_not_interrupt_helpdesk(self):
+        self.bot.get_guild.return_value=SimpleNamespace(chunked=True,members=[])
+        self.api.put=AsyncMock(side_effect=RuntimeError('offline'))
+        await self.service.synchronize_members()
+        self.assertTrue(hasattr(self.service,'_members_synced'))
+
     async def test_signing_dm_uses_assigned_account_and_private_portal_link(self):
         request_id='12345678-1234-1234-1234-123456789abc'
         self.member.roles=[SimpleNamespace(id=1516461975239004340)]
