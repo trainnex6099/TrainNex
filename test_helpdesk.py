@@ -35,6 +35,49 @@ class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
         await self.service.synchronize_members()
         self.assertTrue(hasattr(self.service,'_members_synced'))
 
+    async def test_discipline_referral_targets_only_eligible_command_and_skips_delivered(self):
+        sheriff = SimpleNamespace(id=123456789012345681, bot=False, roles=[SimpleNamespace(id=1516454159002501211)], send=AsyncMock(return_value=SimpleNamespace(id=123456789012345690)))
+        under = SimpleNamespace(id=123456789012345682, bot=False, roles=[SimpleNamespace(id=1516452951030239365)], send=AsyncMock())
+        board = SimpleNamespace(id=123456789012345683, bot=False, roles=[SimpleNamespace(id=1516306764172230690)], send=AsyncMock())
+        self.bot.get_guild.return_value = SimpleNamespace(chunk=AsyncMock(), members=[sheriff, under, board])
+        self.api.get = AsyncMock(return_value={'referral': {'id': '12345678-1234-1234-1234-123456789abc', 'kind': 'termination', 'status': 'pending', 'report_id': 'report-test'}, 'roleIds': ['1516454159002501211', '1516306764172230690'], 'signingPath': '/api/auth/discord/login?disciplineId=test', 'deliveries': [{'signer_id': str(board.id), 'status': 'sent'}]})
+        await self.service.execute({'action': 'helpdesk.signature-request', 'disciplineId': '12345678-1234-1234-1234-123456789abc'}, USER)
+        sheriff.send.assert_awaited_once()
+        under.send.assert_not_awaited()
+        board.send.assert_not_awaited()
+        self.assertEqual(sheriff.send.await_args.kwargs['allowed_mentions'].to_dict()['parse'], [])
+        self.assertIn('sign off', sheriff.send.await_args.kwargs['view'].children[0].label)
+        self.assertEqual(self.api.put.await_args.args[1]['signerId'], str(sheriff.id))
+
+    async def test_discipline_handled_edits_dm_and_notifies_submitter_once(self):
+        message = SimpleNamespace(edit=AsyncMock())
+        recipient = SimpleNamespace(dm_channel=SimpleNamespace(fetch_message=AsyncMock(return_value=message)))
+        submitter = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(id=123456789012345691)))
+        self.bot.get_guild.return_value = SimpleNamespace()
+        self.bot.get_user.side_effect = lambda ident: submitter if str(ident) == USER else recipient
+        record = {'id': '12345678-1234-1234-1234-123456789abc', 'report_id': 'report-test', 'kind': 'demotion', 'status': 'approved', 'approved_name': 'Test Sheriff', 'approved_rank': 'Sheriff', 'submitted_by': USER, 'notification_message_id': None}
+        delivery = {'signer_id': OWNER, 'message_id': '123456789012345692', 'handled': 0, 'status': 'sent'}
+        self.api.get = AsyncMock(return_value={'referral': record, 'deliveries': [delivery], 'signingPath': '/api/auth/discord/login?disciplineId=test'})
+        action = {'action': 'helpdesk.signature-request', 'disciplineId': record['id']}
+        await self.service.execute(action, USER)
+        self.assertIn('Handled', message.edit.await_args.kwargs['embed'].title)
+        self.assertIsNone(message.edit.await_args.kwargs['view'])
+        submitter.send.assert_awaited_once()
+        self.assertIn('signed off', submitter.send.await_args.kwargs['embed'].title)
+        record['notification_message_id'] = '123456789012345691'
+        delivery['handled'] = 1
+        await self.service.execute(action, USER)
+        message.edit.assert_awaited_once()
+        submitter.send.assert_awaited_once()
+
+    async def test_discipline_blocked_dm_is_recorded_for_safe_retry(self):
+        recipient = SimpleNamespace(id=int(USER), bot=False, roles=[SimpleNamespace(id=1516454159002501211)], send=AsyncMock(side_effect=discord.Forbidden(SimpleNamespace(status=403, reason='Forbidden'), 'DM blocked')))
+        self.bot.get_guild.return_value = SimpleNamespace(chunk=AsyncMock(), members=[recipient])
+        self.api.get = AsyncMock(return_value={'referral': {'kind': 'termination', 'status': 'pending', 'report_id': 'report-test'}, 'roleIds': ['1516454159002501211'], 'signingPath': '/api/auth/discord/login?disciplineId=test', 'deliveries': []})
+        with self.assertRaises(ValueError):
+            await self.service.execute({'action': 'helpdesk.signature-request', 'disciplineId': '12345678-1234-1234-1234-123456789abc'}, USER)
+        self.assertEqual(self.api.put.await_args.args[1]['status'], 'failed')
+
     async def test_signing_dm_uses_assigned_account_and_private_portal_link(self):
         request_id='12345678-1234-1234-1234-123456789abc'
         self.member.roles=[SimpleNamespace(id=1516461975239004340)]
