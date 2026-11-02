@@ -639,7 +639,76 @@ class SummitHelpdesk:
             await self.publish_record(record)
             await self.archive_channel(record)
 
+    async def execute_discipline(self, action):
+        referral_id = str(action.get('disciplineId', ''))
+        if not re.fullmatch(r'[0-9a-f-]{36}', referral_id):
+            raise ValueError('Invalid disciplinary referral.')
+        endpoint = '/api/internal-affairs/discipline-approvals?id=' + referral_id
+        data = await self.api.get(endpoint)
+        record = data['referral']
+        guild = self.bot.get_guild(GUILD_ID)
+        if not guild:
+            raise ValueError('Summit is not connected to WCSO.')
+        kind = 'Demotion' if record['kind'] == 'demotion' else 'Termination'
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label='Review report & sign off', url=self.api.base_url.rstrip('/') + data['signingPath']))
+        failures = 0
+        if record['status'] == 'pending':
+            await guild.chunk(cache=True)
+            eligible = [m for m in guild.members if not m.bot and any(str(r.id) in data['roleIds'] for r in m.roles)]
+            if not eligible:
+                raise ValueError('No eligible command members are available for this referral.')
+            delivered = {d['signer_id'] for d in data['deliveries'] if d['status'] == 'sent'}
+            for member in eligible:
+                if str(member.id) in delivered:
+                    continue
+                embed = discord.Embed(title='🖊️ ' + kind + ' referral — sign-off required', description='Review the private report PDF and sign with your own Discord account. The first eligible command signature handles this request for everyone.', colour=0x143E31)
+                embed.add_field(name='Report', value='`' + record['report_id'][:8] + '`')
+                try:
+                    message = await member.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+                    await self.api.put(endpoint, {'signerId': str(member.id), 'status': 'sent', 'messageId': str(message.id)})
+                except discord.HTTPException:
+                    failures += 1
+                    await self.api.put(endpoint, {'signerId': str(member.id), 'status': 'failed', 'error': 'Discord blocked the signing DM. Enable server DMs or use the private portal signing page.'})
+            if failures:
+                raise ValueError('Some command signing DMs could not be delivered. Successful deliveries are retained; retry from the portal.')
+            return {'status': 'disciplinary signing requests delivered'}
+        if record['status'] != 'approved':
+            raise ValueError('Unsupported referral status.')
+        handled = discord.Embed(title='✅ ' + kind + ' referral — Handled', description='This referral has already been handled. No further signature is needed.', colour=0x143E31)
+        handled.add_field(name='Handled by', value=str(record.get('approved_name') or 'Command') + ' · ' + str(record.get('approved_rank') or 'Command'), inline=False)
+        handled.add_field(name='Report', value='`' + record['report_id'][:8] + '`')
+        for delivery in data['deliveries']:
+            if not delivery.get('message_id') or delivery.get('handled'):
+                continue
+            try:
+                recipient = self.bot.get_user(int(delivery['signer_id'])) or await self.bot.fetch_user(int(delivery['signer_id']))
+                channel = recipient.dm_channel or await recipient.create_dm()
+                message = await channel.fetch_message(int(delivery['message_id']))
+                await message.edit(embed=handled, view=None)
+                await self.api.put(endpoint, {'signerId': delivery['signer_id'], 'status': 'sent', 'messageId': delivery['message_id'], 'handled': True})
+            except discord.NotFound:
+                await self.api.put(endpoint, {'signerId': delivery['signer_id'], 'status': 'sent', 'messageId': delivery['message_id'], 'handled': True})
+            except discord.HTTPException:
+                failures += 1
+                await self.api.put(endpoint, {'signerId': delivery['signer_id'], 'status': 'sent', 'messageId': delivery['message_id'], 'error': 'Discord could not update this DM to handled. Its portal link still enforces the completed status.'})
+        if not record.get('notification_message_id'):
+            try:
+                submitter = self.bot.get_user(int(record['submitted_by'])) or await self.bot.fetch_user(int(record['submitted_by']))
+                notification = discord.Embed(title='✅ Your ' + kind.lower() + ' referral was signed off', description='Command approved your referral. The report PDF includes the recorded command signature. This approval does not automatically apply a punishment.', colour=0x143E31)
+                notification.add_field(name='Approved by', value=str(record.get('approved_name') or 'Command') + ' · ' + str(record.get('approved_rank') or 'Command'))
+                message = await submitter.send(embed=notification, view=view, allowed_mentions=discord.AllowedMentions.none())
+                await self.api.put(endpoint, {'notificationMessageId': str(message.id)})
+            except discord.HTTPException:
+                failures += 1
+                await self.api.put(endpoint, {'notificationError': 'Discord blocked the submitter notification. The signed report is available in the portal.'})
+        if failures:
+            raise ValueError('Some handled-message updates or the submitter notification failed. Retry from the portal; completed deliveries are retained.')
+        return {'status': 'referral handled; submitter notified'}
+
     async def execute(self, action, actor_id):
+        if action.get('action') == 'helpdesk.signature-request' and action.get('disciplineId'):
+            return await self.execute_discipline(action)
         if action['action']=='helpdesk.signature-request':
             request_id=str(action.get('requestId',''))
             if not re.fullmatch(r'[0-9a-f-]{36}',request_id):raise ValueError('Invalid signing request.')
