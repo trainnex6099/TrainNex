@@ -16,6 +16,36 @@ USER = 123456789012345678
 
 
 class DispatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_admin_loa_permissions_and_lifecycle(self):
+        store.save_loa_settings(GUILD, {"enabled": True})
+        member = SimpleNamespace(id=USER + 1, display_name="Deputy", mention="<@123>", bot=False)
+        interaction = SimpleNamespace(
+            guild=self.guild, user=self.member,
+            response=AsyncMock(), followup=AsyncMock(),
+        )
+        with patch.object(main, "_can_review_loa", return_value=False):
+            await main._manage_member_loa(interaction, member, "start", "2D", "Vacation")
+        self.assertIsNone(store.get_current_loa(GUILD, member.id))
+        with patch.object(main, "_can_review_loa", return_value=True), patch.object(
+            main, "sync_loa_record_to_portal", new_callable=AsyncMock
+        ) as sync, patch.object(main, "_apply_loa_role", new_callable=AsyncMock) as role:
+            await main._manage_member_loa(interaction, member, "start", "2D", "Vacation")
+            started = store.get_current_loa(GUILD, member.id)
+            self.assertEqual(started["status"], "approved")
+            self.assertEqual(started["reviewed_by"], str(self.member.id))
+            await main._manage_member_loa(interaction, member, "start", "2D", "Duplicate")
+            self.assertEqual(store.get_current_loa(GUILD, member.id)["loa_id"], started["loa_id"])
+            await main._manage_member_loa(interaction, member, "extend", "1D")
+            self.assertEqual(store.get_current_loa(GUILD, member.id)["end_at"], started["end_at"] + 86400)
+            await main._manage_member_loa(interaction, member, "edit", "4D", "Updated reason")
+            edited = store.get_current_loa(GUILD, member.id)
+            self.assertEqual(edited["reason"], "Updated reason")
+            self.assertEqual(edited["end_at"], started["start_at"] + 4 * 86400)
+            await main._manage_member_loa(interaction, member, "end")
+            self.assertEqual(store.get_loa(started["loa_id"])["status"], "ended")
+            self.assertEqual(sync.await_count, 4)
+            role.assert_awaited_with(self.guild, member.id, False)
+
     async def test_restricted_shift_uses_live_roles_and_preserves_permissions(self):
         type_id=store.save_shift_type(GUILD,{'name':'SRT','permitted_role_ids':['999999999999999999']})
         action={'action':'shift.start','guildId':str(GUILD),'type':'SRT'}

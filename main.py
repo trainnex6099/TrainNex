@@ -2601,12 +2601,17 @@ async def _send_loa_dm(user: discord.abc.User, guild: discord.Guild, loa: dict, 
         log.info("Could not DM LOA update to user %s", user.id)
 
 
-async def _loa_log(guild: discord.Guild, loa: dict, event: str):
+async def _loa_log(guild: discord.Guild, loa: dict, event: str, actor_id: int | None = None):
     settings = get_loa_settings(guild.id)
     channel_id = str(settings.get("log_channel_id") or "")
     channel = guild.get_channel(int(channel_id)) if channel_id.isdigit() else None
     if isinstance(channel, discord.TextChannel):
-        await channel.send(embed=_loa_log_embed(guild, loa, event))
+        embed = _loa_log_embed(guild, loa, event)
+        if event in ("extended", "edited"):
+            embed.title = f"Leave of Absence {event.title()}"
+        if actor_id:
+            embed.add_field(name="Managed By", value=f"<@{actor_id}>", inline=False)
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def _edit_loa_request_message(
@@ -2888,6 +2893,79 @@ async def loa_active(interaction: discord.Interaction):
             for i, row in enumerate(rows, 1)
         )
     await interaction.response.send_message(embed=embed)
+
+
+loa_admin = app_commands.Group(name="admin", description="Manage another member's LOA", parent=loa)
+
+
+async def _manage_member_loa(interaction, member, action, duration=None, reason=None):
+    if not interaction.guild or not _can_review_loa(interaction.user):
+        return await interaction.response.send_message("You do not have permission to manage LOAs.", ephemeral=True)
+    if not get_loa_settings(interaction.guild.id).get("enabled"):
+        return await interaction.response.send_message("LOAs are disabled in this server.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    try:
+        if member.bot:
+            raise ValueError("Choose a server member rather than a bot.")
+        parsed = _parse_loa_duration(duration) if duration is not None else None
+        if parsed and parsed[1] > 365 * 86400:
+            raise ValueError("Enter a duration of one year or less.")
+        if reason is not None:
+            reason = reason.strip()
+            if not 1 <= len(reason) <= 1000:
+                raise ValueError("Enter a reason between 1 and 1,000 characters.")
+        if action == "start":
+            record = summit_store.start_admin_loa(
+                interaction.guild.id, member.id, member.display_name, *parsed, reason, interaction.user.id
+            )
+        else:
+            current = get_current_loa(interaction.guild.id, member.id)
+            if not current or current["status"] != "approved":
+                raise ValueError("This member has no active LOA.")
+            if action == "end":
+                record = end_loa(current["loa_id"], interaction.user.id)
+            elif action == "extend":
+                record = summit_store.edit_admin_loa(current["loa_id"], extension=parsed)
+            else:
+                if parsed is None and reason is None:
+                    raise ValueError("Enter a new reason, duration, or both.")
+                record = summit_store.edit_admin_loa(current["loa_id"], reason=reason, duration=parsed)
+    except ValueError as error:
+        return await interaction.followup.send(str(error), ephemeral=True)
+
+    await sync_loa_record_to_portal(record)
+    await _apply_loa_role(interaction.guild, member.id, record["status"] == "approved")
+    await _edit_loa_request_message(interaction.guild, record, member)
+    event = {"start": "approved", "end": "ended_early", "extend": "extended", "edit": "edited"}[action]
+    try:
+        await _loa_log(interaction.guild, record, event, actor_id=interaction.user.id)
+    except discord.HTTPException:
+        log.warning("Could not log admin LOA update for %s", record["loa_id"])
+    summary = f"{member.mention}'s LOA was {event.replace('_', ' ')}."
+    if record["status"] == "approved":
+        summary += f" Scheduled end: <t:{record['end_at']}:F>."
+    await interaction.followup.send(summary, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+@loa_admin.command(name="start", description="Start an approved LOA for a member.")
+async def loa_admin_start(interaction: discord.Interaction, member: discord.Member, duration: str, reason: str):
+    await _manage_member_loa(interaction, member, "start", duration, reason)
+
+
+@loa_admin.command(name="end", description="End a member's active LOA.")
+async def loa_admin_end(interaction: discord.Interaction, member: discord.Member):
+    await _manage_member_loa(interaction, member, "end")
+
+
+@loa_admin.command(name="extend", description="Add time to a member's current LOA end date.")
+async def loa_admin_extend(interaction: discord.Interaction, member: discord.Member, duration: str):
+    await _manage_member_loa(interaction, member, "extend", duration)
+
+
+@loa_admin.command(name="edit", description="Change the reason or total duration measured from the original start.")
+async def loa_admin_edit(interaction: discord.Interaction, member: discord.Member,
+                         reason: str | None = None, duration: str | None = None):
+    await _manage_member_loa(interaction, member, "edit", duration, reason)
 
 
 bot.tree.add_command(loa)
