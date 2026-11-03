@@ -648,6 +648,61 @@ def create_loa_request(guild_id, user_id, username, duration_text, duration_seco
     return get_loa(loa_id)
 
 
+def start_admin_loa(guild_id, user_id, username, duration_text, seconds, reason, actor_id):
+    """Create an approved leave record without a pending review."""
+    init_loa_db()
+    now = int(time.time())
+    loa_id = new_loa_id()
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        current = db.execute(
+            "SELECT 1 FROM loa_requests WHERE guild_id=? AND user_id=? AND status IN ('pending','approved')",
+            (str(guild_id), str(user_id)),
+        ).fetchone()
+        if current:
+            raise ValueError("This member already has a pending or active LOA.")
+        db.execute(
+            """INSERT INTO loa_requests(
+                loa_id,guild_id,user_id,username,reason,duration_text,duration_seconds,
+                start_at,end_at,status,requested_at,reviewed_at,reviewed_by
+            ) VALUES(?,?,?,?,?,?,?,?,?,'approved',?,?,?)""",
+            (loa_id, str(guild_id), str(user_id), username, reason, duration_text,
+             seconds, now, now + seconds, now, now, str(actor_id)),
+        )
+    return get_loa(loa_id)
+
+
+def edit_admin_loa(loa_id, *, reason=None, duration=None, extension=None):
+    """Update an active leave. A new duration is measured from the original start."""
+    init_loa_db()
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT * FROM loa_requests WHERE loa_id=? AND status='approved' AND end_at>?",
+            (loa_id, int(time.time())),
+        ).fetchone()
+        if not row:
+            raise ValueError("This member has no active LOA to edit.")
+        duration_text = row["duration_text"]
+        seconds = row["duration_seconds"]
+        end_at = row["end_at"]
+        if duration:
+            duration_text, seconds = duration
+            end_at = row["start_at"] + seconds
+            if end_at <= int(time.time()):
+                raise ValueError("The new duration would end in the past. Use the end command instead.")
+        if extension:
+            _, extra_seconds = extension
+            end_at += extra_seconds
+            seconds = end_at - row["start_at"]
+            duration_text = f"{seconds // 3600}H"
+        db.execute(
+            "UPDATE loa_requests SET reason=?,duration_text=?,duration_seconds=?,end_at=? WHERE loa_id=?",
+            (reason if reason is not None else row["reason"], duration_text, seconds, end_at, loa_id),
+        )
+    return get_loa(loa_id)
+
+
 def get_loa(loa_id):
     init_loa_db()
     with connect() as db:
