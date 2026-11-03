@@ -1915,9 +1915,7 @@ def _shift_break_total(s: dict) -> int:
 
 
 def _shift_worked(s: dict) -> int:
-    now = int(time.time())
-    end = int(s.get("ended_at") or now)
-    return max(0, end - int(s["started_at"]) - _shift_break_total(s))
+    return summit_store.shift_worked_seconds(s)
 
 
 def _discord_time(ts: int) -> str:
@@ -2366,43 +2364,188 @@ async def shift_board(
     await interaction.response.send_message(embed=embed)
 
 
-@shift.command(name="admin", description="Force-end an active shift by Shift ID.")
-@app_commands.describe(shift_id="The Summit Shift ID", reason="Why the shift is being force-ended")
-async def shift_admin(
-    interaction: discord.Interaction,
-    shift_id: str,
-    reason: str = "Admin correction",
-):
-    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-        return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
-    if not _is_shift_admin(interaction.user):
-        return await interaction.response.send_message(
-            "You do not have permission to manage other users' shifts.", ephemeral=True
-        )
-    shift_record = get_shift(shift_id.upper())
-    if (
-        not shift_record
-        or str(shift_record["guild_id"]) != str(interaction.guild.id)
-        or shift_record["status"] not in ("active", "break")
-    ):
-        return await interaction.response.send_message(
-            "That active Shift ID was not found in this server.", ephemeral=True
-        )
+class ShiftAdminHistory(discord.ui.View):
+    def __init__(self, panel):
+        super().__init__(timeout=900)
+        self.panel = panel
+        self.offset = 0
 
-    await interaction.response.defer(ephemeral=True)
-    member = interaction.guild.get_member(int(shift_record["user_id"]))
-    shift_type = get_shift_type(shift_record["shift_type_id"])
-    shift_record = end_shift(
-        shift_record["shift_id"], reason, str(interaction.user.id)
-    )
-    await sync_shift_record_to_portal(shift_record)
-    if member:
-        await _apply_shift_roles(member, shift_type, "ended")
-    await _shift_log(interaction.guild, shift_record, "admin_ended", member)
-    await interaction.followup.send(
-        f"Ended `{shift_record['shift_id']}` for <@{shift_record['user_id']}>. Reason: {reason}",
-        ephemeral=True,
-    )
+    async def interaction_check(self, interaction):
+        return await self.panel.interaction_check(interaction)
+
+    def render(self):
+        rows = summit_store.list_member_shifts(self.panel.guild_id, self.panel.member.id, self.offset, 11)
+        self.previous.disabled = self.offset == 0
+        self.next_page.disabled = len(rows) <= 10
+        lines = [
+            f"`{row['shift_id']}` · {row['shift_type_name']} · {row['status'].title()} · "
+            f"{_fmt_duration(_shift_worked(row))} · <t:{row['started_at']}:d>"
+            for row in rows[:10]
+        ]
+        return discord.Embed(title=f"Shift List · {self.panel.member.display_name}",
+                             description="\n".join(lines) or "No shifts on this page.")
+
+    @discord.ui.button(label="Previous")
+    async def previous(self, interaction, button):
+        self.offset = max(0, self.offset - 10)
+        await interaction.response.edit_message(embed=self.render(), view=self)
+
+    @discord.ui.button(label="Next")
+    async def next_page(self, interaction, button):
+        self.offset += 10
+        await interaction.response.edit_message(embed=self.render(), view=self)
+
+
+class ShiftAdminCorrection(discord.ui.Modal):
+    def __init__(self, panel, action):
+        super().__init__(title={"modify": "Modify Shift", "delete": "Delete Shift", "clear": "Clear User Shifts"}[action])
+        self.panel = panel
+        self.action = action
+        if action != "clear":
+            self.shift_id = discord.ui.TextInput(label="Completed Shift ID", max_length=40)
+            self.add_item(self.shift_id)
+        if action == "modify":
+            self.operation = discord.ui.TextInput(label="Add, Remove, Set, or Reset", max_length=6)
+            self.minutes = discord.ui.TextInput(label="Minutes (leave blank for Reset)", required=False, max_length=6)
+            self.add_item(self.operation)
+            self.add_item(self.minutes)
+        else:
+            self.confirm = discord.ui.TextInput(label=f"Type {action.upper()} to confirm", max_length=6)
+            self.add_item(self.confirm)
+
+    async def on_submit(self, interaction):
+        if not await self.panel.interaction_check(interaction):
+            return
+        action = self.action
+        seconds = 0
+        if action == "modify":
+            action = self.operation.value.strip().lower()
+            if action not in ("add", "remove", "set", "reset"):
+                return await interaction.response.send_message("Enter Add, Remove, Set, or Reset.", ephemeral=True)
+            minutes = self.minutes.value.strip()
+            if action != "reset":
+                if not re.fullmatch(r"[0-9]{1,6}", minutes) or (action != "set" and int(minutes) == 0):
+                    return await interaction.response.send_message("Enter a valid whole number of minutes.", ephemeral=True)
+                seconds = int(minutes) * 60
+        elif self.confirm.value.strip() != action.upper():
+            return await interaction.response.send_message("Confirmation did not match. No shifts changed.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            rows = summit_store.manage_completed_shifts(
+                self.panel.guild_id, self.panel.member.id, interaction.user.id, action,
+                shift_id=None if action == "clear" else self.shift_id.value.strip().upper(), seconds=seconds,
+            )
+        except ValueError as error:
+            return await interaction.followup.send(str(error), ephemeral=True)
+        if SUMMIT_API.configured:
+            try:
+                for record in rows:
+                    await SUMMIT_API.sync_shift_record(record)
+                await publish_portal_state(self.panel.guild_id)
+            except Exception as error:
+                log.warning("Could not sync shift corrections to the portal: %s", error)
+        log.info("Shift admin %s by %s for %s: %s record(s)", action, interaction.user.id,
+                 self.panel.member.id, len(rows))
+        await interaction.edit_original_response(embed=self.panel.render(), view=self.panel)
+        await interaction.followup.send(f"Updated {len(rows)} shift record(s).", ephemeral=True)
+
+
+class ShiftAdminView(discord.ui.View):
+    def __init__(self, actor_id, member):
+        super().__init__(timeout=900)
+        self.actor_id = actor_id
+        self.member = member
+        self.guild_id = member.guild.id
+
+    async def interaction_check(self, interaction):
+        if (interaction.guild_id != self.guild_id or interaction.user.id != self.actor_id
+                or not isinstance(interaction.user, discord.Member) or not _is_shift_admin(interaction.user)):
+            await interaction.response.send_message("You cannot use this shift admin panel.", ephemeral=True)
+            return False
+        return True
+
+    def render(self):
+        active = get_active_shift(self.guild_id, self.member.id)
+        default = next((row for row in list_shift_types(self.guild_id) if row.get("is_default")), None)
+        self.start.disabled = bool(active) or not default
+        self.pause.disabled = self.end.disabled = not active
+        self.pause.label = "Resume" if active and active["status"] == "break" else "Pause"
+        selected = active["shift_type_name"] if active else default["name"] if default else "No default configured"
+        embed = _shift_manage_embed(self.member, selected, active)
+        embed.title = f"Shift Management · {self.member.display_name}"
+        embed.set_footer(text="All shift types · Start uses the configured default")
+        return embed
+
+    @discord.ui.select(placeholder="Shift Actions", row=0, options=[
+        discord.SelectOption(label="View Shift List", value="history", description="View this member’s shift history"),
+        discord.SelectOption(label="Modify Shift", value="modify", description="Add, remove, set, or reset credited time"),
+        discord.SelectOption(label="Delete Shift", value="delete", description="Exclude one completed shift"),
+        discord.SelectOption(label="Clear User Shifts", value="clear", description="Exclude all completed shifts across all types"),
+    ])
+    async def actions(self, interaction, select):
+        action = select.values[0]
+        if action == "history":
+            view = ShiftAdminHistory(self)
+            return await interaction.response.send_message(embed=view.render(), view=view, ephemeral=True)
+        await interaction.response.send_modal(ShiftAdminCorrection(self, action))
+
+    async def update(self, interaction, action):
+        await interaction.response.defer()
+        try:
+            active = get_active_shift(self.guild_id, self.member.id)
+            if action == "start":
+                if not get_shift_settings(self.guild_id).get("enabled", 1):
+                    raise ValueError("Shifts are disabled for this server.")
+                shift_type = next((row for row in list_shift_types(self.guild_id) if row.get("is_default")), None)
+                if not shift_type:
+                    raise ValueError("Configure a default shift type before starting a shift.")
+                record = start_shift(self.guild_id, self.member.id, self.member.display_name,
+                                     self.member.top_role.name, shift_type["id"])
+                event = "started"
+            else:
+                if not active:
+                    raise ValueError("This member has no active shift.")
+                if action == "pause":
+                    paused = active["status"] != "break"
+                    record = set_shift_break(active["shift_id"], paused)
+                    event = "break_started" if paused else "break_ended"
+                else:
+                    record = end_shift(active["shift_id"], "Ended from shift admin panel", interaction.user.id)
+                    event = "admin_ended"
+            shift_type = get_shift_type(record["shift_type_id"]) or {}
+        except ValueError as error:
+            return await interaction.followup.send(str(error), ephemeral=True)
+        await sync_shift_record_to_portal(record)
+        try:
+            await _apply_shift_roles(self.member, shift_type, record["status"])
+            await _shift_log(interaction.guild, record, event, self.member)
+        except discord.HTTPException:
+            log.warning("Could not complete Discord role or log update for %s", record["shift_id"])
+        log.info("Shift admin %s by %s for %s", event, interaction.user.id, record["shift_id"])
+        await interaction.edit_original_response(embed=self.render(), view=self)
+
+    @discord.ui.button(label="Start", emoji="▶️", style=discord.ButtonStyle.success, row=1)
+    async def start(self, interaction, button):
+        await self.update(interaction, "start")
+
+    @discord.ui.button(label="Pause", emoji="⏸️", style=discord.ButtonStyle.secondary, row=1)
+    async def pause(self, interaction, button):
+        await self.update(interaction, "pause")
+
+    @discord.ui.button(label="End", emoji="⏹️", style=discord.ButtonStyle.danger, row=1)
+    async def end(self, interaction, button):
+        await self.update(interaction, "end")
+
+
+@shift.command(name="admin", description="Open shift management for a server member.")
+@app_commands.describe(member="The member whose shifts you want to manage")
+async def shift_admin(interaction: discord.Interaction, member: discord.Member):
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member) or not _is_shift_admin(interaction.user):
+        return await interaction.response.send_message("You do not have permission to manage other users' shifts.", ephemeral=True)
+    if member.bot:
+        return await interaction.response.send_message("Choose a server member rather than a bot.", ephemeral=True)
+    view = ShiftAdminView(interaction.user.id, member)
+    await interaction.response.send_message(embed=view.render(), view=view, ephemeral=True)
 
 
 bot.tree.add_command(shift)

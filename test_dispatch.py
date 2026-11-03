@@ -16,6 +16,36 @@ USER = 123456789012345678
 
 
 class DispatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shift_admin_panel_and_completed_corrections(self):
+        from summit_wire import shift_payload
+
+        type_id = store.get_shift_type_by_name(GUILD, "Patrol")["id"]
+        target = SimpleNamespace(id=USER + 1, guild=self.guild, display_name="Deputy",
+                                 top_role=SimpleNamespace(name="Deputy"))
+        panel = main.ShiftAdminView(USER, target)
+        self.assertEqual([o.label for o in panel.actions.options],
+                         ["View Shift List", "Modify Shift", "Delete Shift", "Clear User Shifts"])
+        command = main.shift.get_command("admin")
+        self.assertEqual([parameter.name for parameter in command.parameters], ["member"])
+        started = store.start_shift(GUILD, target.id, "Deputy", "Deputy", type_id)
+        record_id = started["shift_id"]
+        with self.assertRaises(ValueError):
+            store.manage_completed_shifts(GUILD, target.id, USER, "delete", shift_id=record_id)
+        ended = store.end_shift(record_id)
+        modified, = store.manage_completed_shifts(GUILD, target.id, USER, "set", shift_id=record_id, seconds=1800)
+        self.assertEqual(modified["ended_at"], ended["ended_at"])
+        self.assertEqual(shift_payload(modified)["workedSeconds"], 1800)
+        self.assertEqual(store.get_shift_user_stats(GUILD, target.id)["total_seconds"], 1800)
+        self.assertEqual(store.shift_leaderboard(GUILD)[0]["seconds"], 1800)
+        with self.assertRaises(ValueError):
+            store.manage_completed_shifts(GUILD, USER, USER, "delete", shift_id=record_id)
+        store.manage_completed_shifts(GUILD, target.id, USER, "reset", shift_id=record_id)
+        self.assertIsNone(store.get_shift(record_id)["worked_override_seconds"])
+        store.manage_completed_shifts(GUILD, target.id, USER, "clear")
+        self.assertEqual(store.get_shift(record_id)["status"], "deleted")
+        self.assertEqual(store.list_member_shifts(GUILD, target.id), [])
+        self.assertEqual(store.shift_leaderboard(GUILD), [])
+
     async def test_admin_loa_permissions_and_lifecycle(self):
         store.save_loa_settings(GUILD, {"enabled": True})
         member = SimpleNamespace(id=USER + 1, display_name="Deputy", mention="<@123>", bot=False)
