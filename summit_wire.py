@@ -13,6 +13,8 @@ def shift_payload(record, now=None):
     if record['status'] == 'break' and record.get('break_started_at') is not None:
         breaks += max(0, now - int(record['break_started_at']))
     worked = max(0, int(record.get('ended_at') or now) - int(record['started_at']) - breaks)
+    if record.get('worked_override_seconds') is not None:
+        worked = int(record['worked_override_seconds'])
     return {'id': record['shift_id'], 'employeeId': str(record['user_id']),
             'employeeName': record['username'], 'shiftType': record['shift_type_name'],
             'startTime': iso(record['started_at']), 'endTime': iso(record.get('ended_at')),

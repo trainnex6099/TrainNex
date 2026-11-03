@@ -194,6 +194,7 @@ def init_shift_db():
             adjusted_by TEXT DEFAULT '',
             adjusted_at INTEGER
         )""")
+        _ensure_column(db, "shifts", "worked_override_seconds", "INTEGER")
         db.execute(
             "CREATE INDEX IF NOT EXISTS idx_shifts_active ON shifts(guild_id,user_id,status)"
         )
@@ -381,11 +382,83 @@ def get_last_shift(guild_id, user_id):
     with connect() as db:
         row = db.execute(
             """SELECT * FROM shifts
-               WHERE guild_id=? AND user_id=?
+               WHERE guild_id=? AND user_id=? AND status<>'deleted'
                ORDER BY started_at DESC LIMIT 1""",
             (str(guild_id), str(user_id)),
         ).fetchone()
     return dict(row) if row else None
+
+
+def shift_worked_seconds(record, now=None, *, original=False):
+    override = record.get("worked_override_seconds")
+    if override is not None and not original:
+        return int(override)
+    now = int(time.time()) if now is None else now
+    end = int(record.get("ended_at") or now)
+    breaks = int(record.get("break_seconds") or 0)
+    if record["status"] == "break" and record.get("break_started_at"):
+        breaks += max(0, now - int(record["break_started_at"]))
+    return max(0, end - int(record["started_at"]) - breaks)
+
+
+def list_member_shifts(guild_id, user_id, offset=0, limit=10):
+    init_shift_db()
+    with connect() as db:
+        return [dict(row) for row in db.execute(
+            """SELECT * FROM shifts WHERE guild_id=? AND user_id=? AND status<>'deleted'
+               ORDER BY started_at DESC, shift_id DESC LIMIT ? OFFSET ?""",
+            (str(guild_id), str(user_id), limit, offset),
+        )]
+
+
+def manage_completed_shifts(guild_id, user_id, actor_id, action, *, shift_id=None, seconds=0):
+    """Correct credited time or exclude completed shifts while retaining their records."""
+    init_shift_db()
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        if action == "clear":
+            rows = db.execute(
+                "SELECT * FROM shifts WHERE guild_id=? AND user_id=? AND status='ended'",
+                (str(guild_id), str(user_id)),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT * FROM shifts WHERE guild_id=? AND user_id=? AND shift_id=? AND status='ended'",
+                (str(guild_id), str(user_id), shift_id),
+            ).fetchall()
+        if not rows:
+            raise ValueError("No matching completed shifts for this member.")
+        updated = []
+        for row in rows:
+            record = dict(row)
+            status = "deleted" if action in ("delete", "clear") else "ended"
+            previous = shift_worked_seconds(record)
+            if action == "add":
+                credit = previous + seconds
+            elif action == "remove":
+                if seconds > previous:
+                    raise ValueError("Cannot remove more time than the shift currently credits.")
+                credit = previous - seconds
+            elif action == "set":
+                credit = seconds
+            elif action == "reset":
+                credit = None
+            else:
+                credit = record["worked_override_seconds"]
+            note = f"Admin {action}: {previous}s credited"
+            if status == "ended":
+                new_credit = credit if credit is not None else shift_worked_seconds(record, original=True)
+                note += f" → {new_credit}s"
+            changed_at = int(time.time())
+            db.execute(
+                """UPDATE shifts SET status=?,worked_override_seconds=?,admin_adjustment=?,adjusted_by=?,adjusted_at=?
+                   WHERE shift_id=?""",
+                (status, credit, note, str(actor_id), changed_at, record["shift_id"]),
+            )
+            record.update(status=status, worked_override_seconds=credit, admin_adjustment=note,
+                          adjusted_by=str(actor_id), adjusted_at=changed_at)
+            updated.append(record)
+    return updated
 
 
 def get_shift_user_stats(guild_id, user_id):
@@ -393,17 +466,13 @@ def get_shift_user_stats(guild_id, user_id):
     now = int(time.time())
     with connect() as db:
         rows = db.execute(
-            "SELECT * FROM shifts WHERE guild_id=? AND user_id=?",
+            "SELECT * FROM shifts WHERE guild_id=? AND user_id=? AND status<>'deleted'",
             (str(guild_id), str(user_id)),
         ).fetchall()
     total = 0
     for row in rows:
         s = dict(row)
-        end = int(s.get("ended_at") or now)
-        breaks = int(s.get("break_seconds") or 0)
-        if s.get("status") == "break" and s.get("break_started_at"):
-            breaks += max(0, now - int(s["break_started_at"]))
-        total += max(0, end - int(s["started_at"]) - breaks)
+        total += shift_worked_seconds(s, now)
     count = len(rows)
     return {
         "shift_count": count,
@@ -421,7 +490,7 @@ def upsert_shift_records(records):
         "shift_id", "guild_id", "user_id", "username", "rank_name",
         "shift_type_id", "shift_type_name", "started_at", "ended_at",
         "break_started_at", "break_seconds", "status", "admin_adjustment",
-        "adjusted_by", "adjusted_at",
+        "adjusted_by", "adjusted_at", "worked_override_seconds",
     ]
     with connect() as db:
         for record in records:
@@ -432,8 +501,8 @@ def upsert_shift_records(records):
                 """INSERT INTO shifts(
                        shift_id,guild_id,user_id,username,rank_name,shift_type_id,
                        shift_type_name,started_at,ended_at,break_started_at,
-                       break_seconds,status,admin_adjustment,adjusted_by,adjusted_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       break_seconds,status,admin_adjustment,adjusted_by,adjusted_at,worked_override_seconds
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(shift_id) DO UPDATE SET
                        guild_id=excluded.guild_id,
                        user_id=excluded.user_id,
@@ -448,7 +517,8 @@ def upsert_shift_records(records):
                        status=excluded.status,
                        admin_adjustment=excluded.admin_adjustment,
                        adjusted_by=excluded.adjusted_by,
-                       adjusted_at=excluded.adjusted_at""",
+                       adjusted_at=excluded.adjusted_at,
+                       worked_override_seconds=excluded.worked_override_seconds""",
                 values,
             )
 
@@ -511,7 +581,7 @@ def shift_leaderboard(guild_id, limit=25, shift_type_name=None):
     init_shift_db()
     now = int(time.time())
     params = [str(guild_id)]
-    sql = "SELECT * FROM shifts WHERE guild_id=?"
+    sql = "SELECT * FROM shifts WHERE guild_id=? AND status<>'deleted'"
     if shift_type_name:
         sql += " AND lower(shift_type_name)=lower(?)"
         params.append(str(shift_type_name))
@@ -521,11 +591,7 @@ def shift_leaderboard(guild_id, limit=25, shift_type_name=None):
     totals = {}
     for row in rows:
         s = dict(row)
-        end = int(s.get("ended_at") or now)
-        breaks = int(s.get("break_seconds") or 0)
-        if s.get("status") == "break" and s.get("break_started_at"):
-            breaks += max(0, now - int(s["break_started_at"]))
-        worked = max(0, end - int(s["started_at"]) - breaks)
+        worked = shift_worked_seconds(s, now)
         uid = str(s["user_id"])
         entry = totals.setdefault(uid, {"user_id": uid, "seconds": 0, "shift_count": 0})
         entry["seconds"] += worked
