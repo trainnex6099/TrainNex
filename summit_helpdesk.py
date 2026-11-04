@@ -650,6 +650,17 @@ class SummitHelpdesk:
         if not guild:
             raise ValueError('Summit is not connected to WCSO.')
         kind = 'Demotion' if record['kind'] == 'demotion' else 'Termination'
+        def signer_label(signer):
+            name = discord.utils.escape_markdown(str(signer.get('name') or 'Signer'))
+            rank = discord.utils.escape_markdown(str(signer.get('rank') or 'Employee'))
+            username = discord.utils.escape_markdown(str(signer.get('username') or '').lstrip('@'))
+            user_id = str(signer.get('id') or '')
+            account = f'<@{user_id}>' if re.fullmatch(r'\d{15,22}', user_id) else ''
+            return (name + ' · ' + rank + '\n' + account + (f' (@{username})' if username else '')).strip()[:1024]
+        submitted_signature = data.get('submitterSignature')
+        approval_signer = {'id': record.get('approved_by'), 'name': record.get('approved_name') or 'Command',
+                           'rank': record.get('approved_rank') or 'Command', 'username': record.get('approved_username')}
+
         view = discord.ui.View()
         view.add_item(discord.ui.Button(label='Review report & sign off', url=self.api.base_url.rstrip('/') + data['signingPath']))
         failures = 0
@@ -664,6 +675,8 @@ class SummitHelpdesk:
                     continue
                 embed = discord.Embed(title='🖊️ ' + kind + ' referral — sign-off required', description='Review the private report PDF and sign with your own Discord account. The first eligible command signature handles this request for everyone.', colour=0x143E31)
                 embed.add_field(name='Report', value='`' + record['report_id'][:8] + '`')
+                if submitted_signature:
+                    embed.add_field(name='Already signed by', value=signer_label(submitted_signature), inline=False)
                 try:
                     message = await member.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
                     await self.api.put(endpoint, {'signerId': str(member.id), 'status': 'sent', 'messageId': str(message.id)})
@@ -676,8 +689,10 @@ class SummitHelpdesk:
         if record['status'] != 'approved':
             raise ValueError('Unsupported referral status.')
         handled = discord.Embed(title='✅ ' + kind + ' referral — Handled', description='This referral has already been handled. No further signature is needed.', colour=0x143E31)
-        handled.add_field(name='Handled by', value=str(record.get('approved_name') or 'Command') + ' · ' + str(record.get('approved_rank') or 'Command'), inline=False)
+        handled.add_field(name='Handled by', value=signer_label(approval_signer), inline=False)
         handled.add_field(name='Report', value='`' + record['report_id'][:8] + '`')
+        if submitted_signature:
+            handled.add_field(name='Report signed by', value=signer_label(submitted_signature), inline=False)
         for delivery in data['deliveries']:
             if not delivery.get('message_id') or delivery.get('handled'):
                 continue
@@ -696,7 +711,7 @@ class SummitHelpdesk:
             try:
                 submitter = self.bot.get_user(int(record['submitted_by'])) or await self.bot.fetch_user(int(record['submitted_by']))
                 notification = discord.Embed(title='✅ Your ' + kind.lower() + ' referral was signed off', description='Command approved your referral. The report PDF includes the recorded command signature. This approval does not automatically apply a punishment.', colour=0x143E31)
-                notification.add_field(name='Approved by', value=str(record.get('approved_name') or 'Command') + ' · ' + str(record.get('approved_rank') or 'Command'))
+                notification.add_field(name='Approved by', value=signer_label(approval_signer))
                 message = await submitter.send(embed=notification, view=view, allowed_mentions=discord.AllowedMentions.none())
                 await self.api.put(endpoint, {'notificationMessageId': str(message.id)})
             except discord.HTTPException:
