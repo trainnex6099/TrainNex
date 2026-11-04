@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+import sys
 from collections import deque
 from pathlib import Path
 from typing import Optional
@@ -13,6 +14,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from summit_api import SummitAPI
+from summit_trainnex_diagnostics import run_system_test
+import summit_trainnex_drill as trainnex_drill
 import summit_bridge
 from summit_helpdesk import SummitHelpdesk
 import summit_store
@@ -1611,6 +1614,46 @@ trainner = app_commands.Group(
     name="trainner",
     description="Manage the Trainnex FTO queue.",
 )
+
+
+@trainner.command(name="systemtest", description="Run TrainNex’s full automated workflow and readiness checks.")
+async def trainner_systemtest(interaction: discord.Interaction):
+    if not isinstance(interaction.user, discord.Member) or not is_queue_manager(interaction.user):
+        return await interaction.response.send_message("Use this in the training server with FTO Commander, Overseer, or administrator access.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        result = await run_system_test(sys.modules[__name__])
+    except Exception as error:
+        return await interaction.followup.send("System test could not finish: " + str(error), ephemeral=True)
+    embed = discord.Embed(title="TrainNex Full System Test", description=result["status"],
+                          colour=discord.Color.green() if result["passed"] else discord.Color.orange())
+    for check in result["checks"]:
+        embed.add_field(name=("✅ " if check["passed"] else "❌ ") + check["label"],
+                        value=check["detail"], inline=False)
+    embed.set_footer(text="Live readiness checks + isolated production-workflow simulation")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@trainner.command(name="drill", description="Run a real Discord Claim/Pass drill with selected test FTOs.")
+async def trainner_drill(interaction: discord.Interaction, trainer: discord.Member, next_trainer: Optional[discord.Member] = None):
+    if not isinstance(interaction.user, discord.Member) or not is_queue_manager(interaction.user):
+        return await interaction.response.send_message("Training-server queue manager access required.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        result = await trainnex_drill.start(sys.modules[__name__], interaction.user,
+            [trainer.id] + ([next_trainer.id] if next_trainer else []))
+        await interaction.followup.send(result['status'] + " — use /trainner drillstatus for the event log. Restarting Summit ends interactive drills.", ephemeral=True)
+    except Exception as error:
+        await interaction.followup.send(str(error), ephemeral=True)
+
+
+@trainner.command(name="drillstatus", description="View your interactive test event log or cancel your drill.")
+async def trainner_drillstatus(interaction: discord.Interaction, cancel: bool = False):
+    if not isinstance(interaction.user, discord.Member) or not is_queue_manager(interaction.user):
+        return await interaction.response.send_message("Training-server queue manager access required.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    result = await trainnex_drill.cancel(interaction.user.id) if cancel else trainnex_drill.status(interaction.user.id)
+    await interaction.followup.send(result['status'] + "\n" + "\n".join(result['events']), ephemeral=True)
 
 
 @trainner.command(name="testdm", description="Test whether Trainnex can DM an FTO.")
@@ -3318,6 +3361,17 @@ async def execute_portal_action(action, actor_id):
         await _send_loa_dm(requester, guild, record, record['status'])
         await _edit_loa_request_message(guild, record, requester)
         result = {'loaId': record['loa_id'], 'status': record['status']}
+    elif name in ('training.drill', 'training.drill-status', 'training.drill-cancel'):
+        if guild.id != TRAINING_SERVER_ID or not is_queue_manager(member):
+            raise PermissionError('Training-server queue manager access required')
+        if name == 'training.drill':
+            return await trainnex_drill.start(sys.modules[__name__], member,
+                [int(action.get('trainerId', '0'))] + ([int(action['traineeId'])] if action.get('traineeId') else []))
+        return await trainnex_drill.cancel(member.id) if name == 'training.drill-cancel' else trainnex_drill.status(member.id)
+    elif name == 'training.systemtest':
+        if guild.id != TRAINING_SERVER_ID or not is_queue_manager(member):
+            raise PermissionError('FTO Commander, Overseer, or administrator access required in the training server')
+        return await run_system_test(sys.modules[__name__])
     elif name in ('training.add', 'training.remove', 'training.claim', 'training.pass', 'training.claim-open'):
         if guild.id != TRAINING_SERVER_ID:
             raise ValueError('Use the configured training server')
