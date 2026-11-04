@@ -46,6 +46,46 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.list_member_shifts(GUILD, target.id), [])
         self.assertEqual(store.shift_leaderboard(GUILD), [])
 
+    async def test_central_loa_admin_panel_permissions_and_state(self):
+        store.save_loa_settings(GUILD, {"enabled": True})
+        target = SimpleNamespace(id=USER+1, guild=self.guild, display_name="Deputy", mention="<@123>", bot=False,
+            display_avatar=SimpleNamespace(url="https://example.invalid/avatar.png"))
+        panel = main.LOAAdminView(USER,target)
+        command = main.loa.get_command("admin")
+        self.assertIsInstance(command, main.app_commands.Command)
+        self.assertEqual([p.name for p in command.parameters], ["member"])
+        with patch.object(main, "_loa_manage_embed", return_value=discord.Embed()):
+            panel.render()
+            self.assertFalse(panel.start.disabled)
+            self.assertTrue(panel.end.disabled)
+            record=store.start_admin_loa(GUILD,target.id,"Deputy","2D",2*86400,"Vacation",USER)
+            panel.render()
+            self.assertTrue(panel.start.disabled)
+            self.assertFalse(panel.extend.disabled)
+            self.assertFalse(panel.edit.disabled)
+            self.assertFalse(panel.end.disabled)
+            modal=main.LOAAdminModal(panel,"edit")
+            self.assertEqual(modal.expected_loa_id,record["loa_id"])
+            self.assertFalse(modal.duration.required)
+            self.assertEqual(modal.reason.default,"Vacation")
+            interaction=SimpleNamespace(guild_id=GUILD,guild=self.guild,user=self.member,response=AsyncMock(),followup=AsyncMock(),edit_original_response=AsyncMock())
+            with patch.object(main,"_can_review_loa",return_value=True):
+                self.assertTrue(await panel.interaction_check(interaction))
+                interaction.user=SimpleNamespace(id=USER+2)
+                self.assertFalse(await panel.interaction_check(interaction))
+                interaction.user=self.member
+                interaction.guild_id=GUILD+1
+                self.assertFalse(await panel.interaction_check(interaction))
+                interaction.guild_id=GUILD
+                await main._manage_member_loa(interaction,target,"end",expected_loa_id="STALE")
+                self.assertEqual(store.get_current_loa(GUILD,target.id)["status"],"approved")
+            with patch.object(main,"_can_review_loa",return_value=False):
+                self.assertFalse(await panel.interaction_check(interaction))
+            store.end_loa(record["loa_id"],USER)
+            panel.render()
+            self.assertFalse(panel.start.disabled)
+            self.assertTrue(panel.end.disabled)
+
     async def test_admin_loa_permissions_and_lifecycle(self):
         store.save_loa_settings(GUILD, {"enabled": True})
         member = SimpleNamespace(id=USER + 1, display_name="Deputy", mention="<@123>", bot=False)
