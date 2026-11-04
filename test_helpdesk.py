@@ -40,9 +40,12 @@ class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
         under = SimpleNamespace(id=123456789012345682, bot=False, roles=[SimpleNamespace(id=1516452951030239365)], send=AsyncMock())
         board = SimpleNamespace(id=123456789012345683, bot=False, roles=[SimpleNamespace(id=1516306764172230690)], send=AsyncMock())
         self.bot.get_guild.return_value = SimpleNamespace(chunk=AsyncMock(), members=[sheriff, under, board])
-        self.api.get = AsyncMock(return_value={'referral': {'id': '12345678-1234-1234-1234-123456789abc', 'kind': 'termination', 'status': 'pending', 'report_id': 'report-test'}, 'roleIds': ['1516454159002501211', '1516306764172230690'], 'signingPath': '/api/auth/discord/login?disciplineId=test', 'deliveries': [{'signer_id': str(board.id), 'status': 'sent'}]})
+        self.api.get = AsyncMock(return_value={'referral': {'id': '12345678-1234-1234-1234-123456789abc', 'kind': 'termination', 'status': 'pending', 'report_id': 'report-test'}, 'roleIds': ['1516454159002501211', '1516306764172230690'], 'signingPath': '/api/auth/discord/login?disciplineId=test', 'submitterSignature': {'id': USER, 'name': 'Investigator', 'rank': 'Captain', 'username': 'test.investigator'}, 'deliveries': [{'signer_id': str(board.id), 'status': 'sent'}]})
         await self.service.execute({'action': 'helpdesk.signature-request', 'disciplineId': '12345678-1234-1234-1234-123456789abc'}, USER)
         sheriff.send.assert_awaited_once()
+        signed_field = next(f for f in sheriff.send.await_args.kwargs['embed'].fields if f.name == 'Already signed by')
+        self.assertIn('(@test.investigator)', signed_field.value)
+        self.assertIn(f'<@{USER}>', signed_field.value)
         under.send.assert_not_awaited()
         board.send.assert_not_awaited()
         self.assertEqual(sheriff.send.await_args.kwargs['allowed_mentions'].to_dict()['parse'], [])
@@ -55,12 +58,14 @@ class HelpdeskTests(unittest.IsolatedAsyncioTestCase):
         submitter = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(id=123456789012345691)))
         self.bot.get_guild.return_value = SimpleNamespace()
         self.bot.get_user.side_effect = lambda ident: submitter if str(ident) == USER else recipient
-        record = {'id': '12345678-1234-1234-1234-123456789abc', 'report_id': 'report-test', 'kind': 'demotion', 'status': 'approved', 'approved_name': 'Test Sheriff', 'approved_rank': 'Sheriff', 'submitted_by': USER, 'notification_message_id': None}
+        record = {'id': '12345678-1234-1234-1234-123456789abc', 'report_id': 'report-test', 'kind': 'demotion', 'status': 'approved', 'approved_name': 'Test Sheriff', 'approved_rank': 'Sheriff', 'approved_by': OWNER, 'approved_username': 'test.sheriff', 'submitted_by': USER, 'notification_message_id': None}
         delivery = {'signer_id': OWNER, 'message_id': '123456789012345692', 'handled': 0, 'status': 'sent'}
         self.api.get = AsyncMock(return_value={'referral': record, 'deliveries': [delivery], 'signingPath': '/api/auth/discord/login?disciplineId=test'})
         action = {'action': 'helpdesk.signature-request', 'disciplineId': record['id']}
         await self.service.execute(action, USER)
         self.assertIn('Handled', message.edit.await_args.kwargs['embed'].title)
+        self.assertIn('(@test.sheriff)', message.edit.await_args.kwargs['embed'].fields[0].value)
+        self.assertIn(f'<@{OWNER}>', message.edit.await_args.kwargs['embed'].fields[0].value)
         self.assertIsNone(message.edit.await_args.kwargs['view'])
         submitter.send.assert_awaited_once()
         self.assertIn('signed off', submitter.send.await_args.kwargs['embed'].title)
