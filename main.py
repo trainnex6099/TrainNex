@@ -765,15 +765,6 @@ def trainnex_message(key: str, default: str, **values) -> str:
         return default.format(**safe_values)
 
 
-def logo_url() -> Optional[str]:
-    """
-    Discord embeds cannot use a local file as a thumbnail after restart unless
-    the image is hosted. The code therefore attaches the logo to bot messages
-    when sending an embed and references it as attachment://trainnex_logo.png.
-    """
-    return "attachment://trainnex_logo.png"
-
-
 def build_offer_embed(
     trainee_id: int,
     expires_at: int,
@@ -792,7 +783,6 @@ def build_offer_embed(
         ),
         color=WARNING_COLOR,
     )
-    embed.set_thumbnail(url=logo_url())
     embed.set_footer(text="Trainnex • Field Training System")
     return embed
 
@@ -812,7 +802,6 @@ def build_expired_embed(trainee_id: int, approval_url: str) -> discord.Embed:
         value=f"[View Approval & Results]({approval_url})",
         inline=False,
     )
-    embed.set_thumbnail(url=logo_url())
     embed.set_footer(text="Trainnex • Automatic 30-minute timeout")
     return embed
 
@@ -834,7 +823,6 @@ def build_claimed_dm_embed(trainee_id: int, approval_url: str) -> discord.Embed:
         value=f"[View Approval & Results]({approval_url})",
         inline=False,
     )
-    embed.set_thumbnail(url=logo_url())
     embed.set_footer(text="Trainnex • Field Training System")
     return embed
 
@@ -852,7 +840,6 @@ def build_fallback_embed(trainee_id: int, approval_url: str) -> discord.Embed:
         ),
         color=WARNING_COLOR,
     )
-    embed.set_thumbnail(url=logo_url())
     embed.set_footer(text="Trainnex • Open FTO Claim")
     return embed
 
@@ -875,7 +862,6 @@ def build_fallback_claimed_embed(
         value=f"[View Approval & Results]({approval_url})",
         inline=False,
     )
-    embed.set_thumbnail(url=logo_url())
     embed.set_footer(text="Trainnex • Field Training System")
     return embed
 
@@ -898,7 +884,6 @@ def build_claim_notification(
         value=f"[View Approval & Results]({approval_url})",
         inline=False,
     )
-    embed.set_thumbnail(url=logo_url())
     embed.set_footer(text="Trainnex • Field Training System")
     return embed
 
@@ -1019,12 +1004,7 @@ async def send_offer_to_trainer(
         message = await dm.send(
             embed=embed,
             view=view,
-            files=[
-                discord.File(
-                    "assets/trainnex_logo.png",
-                    filename="trainnex_logo.png",
-                )
-            ],
+
         )
     except discord.Forbidden as e:
         log.error(
@@ -1380,12 +1360,7 @@ async def create_fallback_announcement(
             embed=embed,
             view=FallbackClaimView(trainee_id),
             allowed_mentions=discord.AllowedMentions(roles=True, users=True),
-            files=[
-                discord.File(
-                    "assets/trainnex_logo.png",
-                    filename="trainnex_logo.png",
-                )
-            ],
+
         )
     except discord.HTTPException:
         log.exception("Failed to send fallback announcement.")
@@ -1510,12 +1485,7 @@ async def send_claim_notification(
     try:
         await channel.send(
             embed=embed,
-            files=[
-                discord.File(
-                    "assets/trainnex_logo.png",
-                    filename="trainnex_logo.png",
-                )
-            ],
+
             allowed_mentions=discord.AllowedMentions(users=True),
         )
     except discord.HTTPException:
@@ -1810,7 +1780,6 @@ async def trainner_queue(interaction: discord.Interaction):
         title="📋 Trainnex FTO Queue",
         color=EMBED_COLOR,
     )
-    embed.set_thumbnail(url=logo_url())
 
     if not DATA["queue"]:
         embed.description = "The FTO queue is currently empty."
@@ -1831,12 +1800,7 @@ async def trainner_queue(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=embed,
         ephemeral=True,
-        files=[
-            discord.File(
-                "assets/trainnex_logo.png",
-                filename="trainnex_logo.png",
-            )
-        ],
+
     )
 
 
@@ -1869,7 +1833,6 @@ async def trainner_status(interaction: discord.Interaction):
         title="Trainnex Status",
         color=EMBED_COLOR,
     )
-    embed.set_thumbnail(url=logo_url())
     embed.add_field(name="FTOs in Queue", value=str(len(DATA["queue"])))
     embed.add_field(name="Active Offers", value=str(active_offers))
     embed.add_field(name="Open Fallbacks", value=str(open_fallbacks))
@@ -1887,12 +1850,7 @@ async def trainner_status(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=embed,
         ephemeral=True,
-        files=[
-            discord.File(
-                "assets/trainnex_logo.png",
-                filename="trainnex_logo.png",
-            )
-        ],
+
     )
 
 

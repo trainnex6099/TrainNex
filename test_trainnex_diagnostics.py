@@ -23,7 +23,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         result = await diagnostics.run_system_test(runtime)
         failed = [check for check in result["checks"] if not check["passed"]]
         self.assertEqual(failed, [])
-        self.assertEqual(len(result["checks"]), 16)
+        self.assertEqual(len(result["checks"]), 15)
         self.assertEqual(result["test"], "trainnex-system")
         api.get.assert_awaited_once_with("/api/summit/operations", 44)
 

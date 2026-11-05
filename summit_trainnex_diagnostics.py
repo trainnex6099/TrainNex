@@ -3,7 +3,6 @@ import asyncio
 import json
 import os
 from pathlib import Path
-import shutil
 import sys
 import tempfile
 import time
@@ -42,7 +41,7 @@ async def run_system_test(runtime):
             permissions = channel.permissions_for(guild.me)
             required = ["view_channel", "read_message_history"]
             if writes:
-                required += ["send_messages", "embed_links", "attach_files"]
+                required += ["send_messages", "embed_links"]
             missing = [name.replace("_", " ") for name in required if not getattr(permissions, name, False)]
             record(label, not missing, "Missing: " + ", ".join(missing) if missing else "Channel access and required permissions are available.")
         if application and runtime.MELONY_BOT_ID:
@@ -60,17 +59,7 @@ async def run_system_test(runtime):
         except Exception:
             record("Portal connection", False, "Check Summit’s portal URL, credentials, and connectivity.")
         root = Path(__file__).resolve().parent
-        logo = root / "assets" / "trainnex_logo.png"
-        try:
-            valid_logo = logo.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
-        except OSError:
-            valid_logo = False
-        record("TrainNex artwork", valid_logo, "PNG artwork is readable." if valid_logo else "Restore assets/trainnex_logo.png.")
         with tempfile.TemporaryDirectory(prefix="summit-trainnex-test-") as folder:
-            test_dir = Path(folder)
-            (test_dir / "assets").mkdir()
-            if valid_logo:
-                shutil.copyfile(logo, test_dir / "assets" / logo.name)
             environment = os.environ.copy()
             environment.update(SUMMIT_DATA_DIR=folder, DISCORD_TOKEN="isolated-system-test",
                                SUMMIT_API_BASE_URL="", SUMMIT_API_SECRET="", TRAINNEX_TEST_ROOT=str(root))
