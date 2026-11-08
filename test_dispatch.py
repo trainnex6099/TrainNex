@@ -27,7 +27,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
                          ["View Shift List", "Modify Shift", "Delete Shift", "Clear User Shifts"])
         command = main.shift.get_command("admin")
         self.assertEqual([parameter.name for parameter in command.parameters], ["member"])
-        started = store.start_shift(GUILD, target.id, "Deputy", "Deputy", type_id)
+        started = store.start_shift(GUILD, target.id, "Deputy", "Deputy", type_id, "12")
         record_id = started["shift_id"]
         with self.assertRaises(ValueError):
             store.manage_completed_shifts(GUILD, target.id, USER, "delete", shift_id=record_id)
@@ -118,7 +118,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_restricted_shift_uses_live_roles_and_preserves_permissions(self):
         type_id=store.save_shift_type(GUILD,{'name':'SRT','permitted_role_ids':['999999999999999999']})
-        action={'action':'shift.start','guildId':str(GUILD),'type':'SRT'}
+        action={'action':'shift.start','guildId':str(GUILD),'vcServer':'12','type':'SRT'}
         with self.assertRaises(PermissionError):
             await main.execute_portal_action(action,str(USER))
         self.assertIsNone(store.get_active_shift(GUILD,USER))
@@ -147,7 +147,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(view.end_btn.disabled)
 
     async def test_shift_type_cannot_switch_during_active_shift(self):
-        record=store.start_shift(GUILD,USER,'Deputy','Deputy',store.get_shift_type_by_name(GUILD,'Patrol')['id'])
+        record=store.start_shift(GUILD,USER,'Deputy','Deputy',store.get_shift_type_by_name(GUILD,'Patrol')['id'], "12")
         view=main.ShiftManageView(USER,'Patrol',GUILD)
         response=SimpleNamespace(send_message=AsyncMock(),edit_message=AsyncMock())
         await view.select_type(SimpleNamespace(guild=self.guild,user=self.member,response=response))
@@ -161,6 +161,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         store.save_shift_type(GUILD,{'name':'Patrol','is_default':True})
         self.guild=SimpleNamespace(id=GUILD,fetch_member=AsyncMock(),get_member=MagicMock(return_value=None))
         self.member=MagicMock(spec=discord.Member)
+        self.member.name='deputy'
         self.member.id=USER;self.member.guild=self.guild;self.member.display_name='Deputy'
         self.member.top_role=SimpleNamespace(name='Deputy')
         self.member.roles=[SimpleNamespace(id=1516647746025558017)]
@@ -194,7 +195,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
                 await main.sync_guild_directory_to_portal(self.guild,fresh=True)
 
     async def test_portal_start_discord_end_same_shift(self):
-        result=await main.execute_portal_action({'action':'shift.start','guildId':str(GUILD),'type':'Patrol'},str(USER))
+        result=await main.execute_portal_action({'action':'shift.start','guildId':str(GUILD),'vcServer':'12','type':'Patrol'},str(USER))
         interaction=SimpleNamespace(guild=self.guild,user=self.member,response=SimpleNamespace(defer=AsyncMock()),edit_original_response=AsyncMock(),followup=SimpleNamespace(send=AsyncMock()))
         with patch.object(main,'_shift_manage_embed',return_value=discord.Embed()):
             view=main.ShiftManageView(USER,'Patrol')
@@ -204,7 +205,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_stale_portal_employee_role_rejected(self):
         self.member.roles=[]
         with self.assertRaises(PermissionError):
-            await main.execute_portal_action({'action':'shift.start','guildId':str(GUILD)},str(USER))
+            await main.execute_portal_action({'action':'shift.start','guildId':str(GUILD),'vcServer':'12'},str(USER))
         self.assertEqual(store.list_active_shifts(GUILD),[])
 
     async def test_reset_requires_owner_even_for_employee(self):
@@ -214,7 +215,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reset_retains_shift_history_and_saves_backup(self):
         shift_type=store.get_shift_type_by_name(GUILD,'Patrol')
-        record=store.start_shift(GUILD,USER,'Deputy','Deputy',shift_type['id'])
+        record=store.start_shift(GUILD,USER,'Deputy','Deputy',shift_type['id'], "12")
         with patch.object(main.HELPDESK,'config',AsyncMock(return_value={'ownerId':str(USER)})),patch.object(store,'DATA_DIR',Path(self.tmp.name)),patch.object(main.HELPDESK.store,'path',Path(self.tmp.name)/'helpdesk.db'):
             result=await main.execute_portal_action({'action':'system.reset','guildId':str(GUILD),'target':'shifts','confirmation':'RESET SHIFTS'},str(USER))
         self.assertEqual(store.get_shift(record['shift_id'])['status'],'ended')
@@ -237,9 +238,9 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_shift_system_rejected(self):
         store.save_shift_settings(GUILD,{'enabled':False})
         with self.assertRaises(ValueError):
-            await main.execute_portal_action({'action':'shift.start','guildId':str(GUILD),'type':'Patrol'},str(USER))
+            await main.execute_portal_action({'action':'shift.start','guildId':str(GUILD),'vcServer':'12','type':'Patrol'},str(USER))
     async def test_stale_shift_id_cannot_end_new_shift(self):
-        await main.execute_portal_action({'action':'shift.start','guildId':str(GUILD),'type':'Patrol'},str(USER))
+        await main.execute_portal_action({'action':'shift.start','guildId':str(GUILD),'vcServer':'12','type':'Patrol'},str(USER))
         with self.assertRaises(ValueError):
             await main.execute_portal_action({'action':'shift.end','guildId':str(GUILD),'recordId':'S-OLD'},str(USER))
         self.assertIsNotNone(store.get_active_shift(GUILD,USER))

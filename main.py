@@ -2009,6 +2009,7 @@ async def _shift_log(
         embed.set_author(name=f"@{shift.get('username') or shift['user_id']}")
 
     embed.add_field(name="Staff Member", value=f"<@{shift['user_id']}>", inline=False)
+    embed.add_field(name="VC Server:", value=shift.get("vc_server") or "—", inline=False)
 
     if event == "started":
         embed.add_field(
@@ -2111,6 +2112,7 @@ def _shift_manage_embed(
             value=(
                 f"**Status:** {status}\n"
                 f"**Type:** {active_shift['shift_type_name']}\n"
+                f"**VC Server:** {active_shift.get('vc_server') or '—'}\n"
                 f"**Started:** {_discord_time(active_shift['started_at'])}\n"
                 f"**Shift ID:** `{active_shift['shift_id']}`"
             ),
@@ -2132,6 +2134,20 @@ def can_use_shift_type(member, shift_type):
         except (ValueError, TypeError):
             return False
     return isinstance(permitted, list) and any(str(role.id) in permitted for role in member.roles)
+
+
+class ShiftStartModal(discord.ui.Modal, title="Start shift"):
+    vc_server = discord.ui.TextInput(label="VC Server", placeholder="Enter the server number",
+                                     min_length=1, max_length=12, required=True)
+
+    def __init__(self, panel, start):
+        super().__init__(timeout=300)
+        self.panel = panel
+        self.start = start
+
+    async def on_submit(self, interaction):
+        if await self.panel.interaction_check(interaction):
+            await self.start(interaction, self.vc_server.value)
 
 
 class ShiftManageView(discord.ui.View):
@@ -2187,6 +2203,17 @@ class ShiftManageView(discord.ui.View):
 
     @discord.ui.button(label="Start", emoji="▶️", style=discord.ButtonStyle.success)
     async def start_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        selected_type = self.shift_type_name
+
+        async def start(submission, vc_server):
+            if selected_type != self.shift_type_name:
+                return await submission.response.send_message(
+                    "The selected shift type changed. Open Start again.", ephemeral=True)
+            await self.start_shift_from_modal(submission, vc_server)
+
+        await interaction.response.send_modal(ShiftStartModal(self, start))
+
+    async def start_shift_from_modal(self, interaction, vc_server):
         await interaction.response.defer(ephemeral=True)
         if not get_shift_settings(interaction.guild.id).get('enabled', 1):
             return await interaction.followup.send('Shifts are disabled for this server.', ephemeral=True)
@@ -2208,6 +2235,8 @@ class ShiftManageView(discord.ui.View):
                 interaction.user.display_name,
                 interaction.user.top_role.name,
                 shift_type["id"],
+                vc_server,
+                discord_username=interaction.user.name,
             )
             await sync_shift_record_to_portal(shift)
         except ValueError as exc:
@@ -2331,7 +2360,7 @@ async def shift_active(interaction: discord.Interaction):
         embed.description = "There are no active shifts."
     else:
         embed.description = "\n".join(
-            f"**{index}.** <@{row['user_id']}> • **{row['shift_type_name']}**"
+            f"**{index}.** <@{row['user_id']}> • **{row['shift_type_name']}** • VC Server: {row.get('vc_server') or '—'}"
             for index, row in enumerate(rows, 1)
         )
     await interaction.response.send_message(embed=embed)
@@ -2490,7 +2519,7 @@ class ShiftAdminView(discord.ui.View):
             return await interaction.response.send_message(embed=view.render(), view=view, ephemeral=True)
         await interaction.response.send_modal(ShiftAdminCorrection(self, action))
 
-    async def update(self, interaction, action):
+    async def update(self, interaction, action, vc_server=None):
         await interaction.response.defer()
         try:
             active = get_active_shift(self.guild_id, self.member.id)
@@ -2501,7 +2530,8 @@ class ShiftAdminView(discord.ui.View):
                 if not shift_type:
                     raise ValueError("Configure a default shift type before starting a shift.")
                 record = start_shift(self.guild_id, self.member.id, self.member.display_name,
-                                     self.member.top_role.name, shift_type["id"])
+                                     self.member.top_role.name, shift_type["id"], vc_server,
+                                     discord_username=self.member.name)
                 event = "started"
             else:
                 if not active:
@@ -2527,7 +2557,10 @@ class ShiftAdminView(discord.ui.View):
 
     @discord.ui.button(label="Start", emoji="▶️", style=discord.ButtonStyle.success, row=1)
     async def start(self, interaction, button):
-        await self.update(interaction, "start")
+        async def start(submission, vc_server):
+            await self.update(submission, "start", vc_server)
+
+        await interaction.response.send_modal(ShiftStartModal(self, start))
 
     @discord.ui.button(label="Pause", emoji="⏸️", style=discord.ButtonStyle.secondary, row=1)
     async def pause(self, interaction, button):
@@ -3331,7 +3364,8 @@ async def execute_portal_action(action, actor_id):
                 raise ValueError('Shift type is not configured')
             if not can_use_shift_type(member, shift_type):
                 raise PermissionError('A permitted role is required for this shift type')
-            record = start_shift(guild.id, member.id, member.display_name, member.top_role.name, shift_type['id'])
+            record = start_shift(guild.id, member.id, member.display_name, member.top_role.name,
+                                 shift_type['id'], action.get('vcServer'), discord_username=member.name)
             event = 'started'
         else:
             if not current or current['shift_id'] != action.get('recordId'):

@@ -195,6 +195,8 @@ def init_shift_db():
             adjusted_at INTEGER
         )""")
         _ensure_column(db, "shifts", "worked_override_seconds", "INTEGER")
+        _ensure_column(db, "shifts", "vc_server", "TEXT")
+        _ensure_column(db, "shifts", "discord_username", "TEXT")
         db.execute(
             "CREATE INDEX IF NOT EXISTS idx_shifts_active ON shifts(guild_id,user_id,status)"
         )
@@ -341,20 +343,23 @@ def list_active_shifts(guild_id):
     return [dict(r) for r in rows]
 
 
-def start_shift(guild_id, user_id, username, rank_name, type_id):
+def start_shift(guild_id, user_id, username, rank_name, type_id, vc_server, *, discord_username=None):
+    if (not isinstance(vc_server, str) or not 1 <= len(vc_server) <= 12
+            or not vc_server.isascii() or not vc_server.isdecimal()):
+        raise ValueError("Enter a VC server number using 1–12 digits.")
     shift_type = get_shift_type(type_id)
     if not shift_type or str(shift_type["guild_id"]) != str(guild_id):
         raise ValueError("Invalid shift type")
-    if get_active_shift(guild_id, user_id):
-        raise ValueError("You already have an active shift")
     shift_id = new_shift_id()
     now = int(time.time())
     with connect() as db:
-        db.execute(
+        inserted = db.execute(
             """INSERT INTO shifts(
                    shift_id,guild_id,user_id,username,rank_name,shift_type_id,
-                   shift_type_name,started_at,status
-               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                   shift_type_name,started_at,status,vc_server,discord_username
+               ) SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (
+                   SELECT 1 FROM shifts WHERE guild_id=? AND user_id=? AND status IN ('active','break')
+               )""",
             (
                 shift_id,
                 str(guild_id),
@@ -365,8 +370,14 @@ def start_shift(guild_id, user_id, username, rank_name, type_id):
                 shift_type["name"],
                 now,
                 "active",
+                vc_server,
+                discord_username,
+                str(guild_id),
+                str(user_id),
             ),
         )
+        if not inserted.rowcount:
+            raise ValueError("You already have an active shift")
     return get_shift(shift_id)
 
 
@@ -490,7 +501,7 @@ def upsert_shift_records(records):
         "shift_id", "guild_id", "user_id", "username", "rank_name",
         "shift_type_id", "shift_type_name", "started_at", "ended_at",
         "break_started_at", "break_seconds", "status", "admin_adjustment",
-        "adjusted_by", "adjusted_at", "worked_override_seconds",
+        "adjusted_by", "adjusted_at", "worked_override_seconds", "vc_server", "discord_username",
     ]
     with connect() as db:
         for record in records:
@@ -501,8 +512,9 @@ def upsert_shift_records(records):
                 """INSERT INTO shifts(
                        shift_id,guild_id,user_id,username,rank_name,shift_type_id,
                        shift_type_name,started_at,ended_at,break_started_at,
-                       break_seconds,status,admin_adjustment,adjusted_by,adjusted_at,worked_override_seconds
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       break_seconds,status,admin_adjustment,adjusted_by,adjusted_at,worked_override_seconds,
+                       vc_server,discord_username
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(shift_id) DO UPDATE SET
                        guild_id=excluded.guild_id,
                        user_id=excluded.user_id,
@@ -518,7 +530,9 @@ def upsert_shift_records(records):
                        admin_adjustment=excluded.admin_adjustment,
                        adjusted_by=excluded.adjusted_by,
                        adjusted_at=excluded.adjusted_at,
-                       worked_override_seconds=excluded.worked_override_seconds""",
+                       worked_override_seconds=excluded.worked_override_seconds,
+                       vc_server=COALESCE(excluded.vc_server, shifts.vc_server),
+                       discord_username=COALESCE(excluded.discord_username, shifts.discord_username)""",
                 values,
             )
 
