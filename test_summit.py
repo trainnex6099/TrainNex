@@ -45,7 +45,7 @@ class SummitTests(unittest.IsolatedAsyncioTestCase):
         store.DB_PATH = self.original
         self.tmp.cleanup()
     def start(self):
-        return store.start_shift('1516305981078900756','123456789012345678','Deputy','Deputy',self.type_id)
+        return store.start_shift('1516305981078900756','123456789012345678','Deputy','Deputy',self.type_id, "12")
     async def test_shift_cross_surface_and_break_exclusion(self):
         with patch('summit_store.time.time', return_value=1000):
             s = self.start()
