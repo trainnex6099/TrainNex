@@ -2075,7 +2075,7 @@ def _shift_manage_embed(
     last = get_last_shift(member.guild.id, member.id)
 
     embed = discord.Embed(color=discord.Color.blue())
-    embed.set_author(name="Shift Management", icon_url=member.display_avatar.url)
+    embed.set_author(name=f"Shift Management · {member.display_name}", icon_url=member.display_avatar.url)
 
     embed.add_field(
         name="All-Time Information",
@@ -2214,7 +2214,7 @@ class ShiftManageView(discord.ui.View):
         await interaction.response.send_modal(ShiftStartModal(self, start))
 
     async def start_shift_from_modal(self, interaction, vc_server):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         if not get_shift_settings(interaction.guild.id).get('enabled', 1):
             return await interaction.followup.send('Shifts are disabled for this server.', ephemeral=True)
         shift_type = get_shift_type_by_name(interaction.guild.id, self.shift_type_name)
@@ -2252,7 +2252,7 @@ class ShiftManageView(discord.ui.View):
 
     @discord.ui.button(label="Pause", emoji="⏸️", style=discord.ButtonStyle.secondary)
     async def pause_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         shift = get_active_shift(interaction.guild.id, interaction.user.id)
         if not shift:
             return await interaction.followup.send(
@@ -2281,7 +2281,7 @@ class ShiftManageView(discord.ui.View):
 
     @discord.ui.button(label="End", emoji="⏹️", style=discord.ButtonStyle.danger)
     async def end_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         shift = get_active_shift(interaction.guild.id, interaction.user.id)
         if not shift:
             return await interaction.followup.send(
@@ -2329,14 +2329,13 @@ async def shift_manage(interaction: discord.Interaction, type: str | None = None
                 ephemeral=True,
             )
 
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
     selected = active["shift_type_name"] if active else type
     view = ShiftManageView(interaction.user.id, selected, interaction.guild.id, interaction.user)
     view.sync_state(active)
     await interaction.followup.send(
         embed=_shift_manage_embed(interaction.user, selected, active),
         view=view,
-        ephemeral=True,
     )
 
 
